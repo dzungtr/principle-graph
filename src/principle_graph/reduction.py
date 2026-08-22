@@ -57,6 +57,7 @@ def assemble_delta(candidates: Sequence[GraphEdge], existing: Sequence[GraphEdge
     current = {_key(edge): edge for edge in existing}
     new_edges: list[GraphEdge] = []
     changes: list[tuple[str, str, str, float, float]] = []
+    updated_edges: list[GraphEdge] = []
     for edge in proposed:
         old = current.get(_key(edge))
         if old is None:
@@ -65,7 +66,9 @@ def assemble_delta(candidates: Sequence[GraphEdge], existing: Sequence[GraphEdge
             merged = reduce_edges([old, edge])[0]
             if merged.confidence != old.confidence or merged.evidence != old.evidence:
                 changes.append((edge.subject, edge.relation, edge.object, old.confidence, merged.confidence))
-    return GraphDelta(new_entities=list(entities), new_edges=new_edges, confidence_changes=changes)
+                updated_edges.append(merged)
+    return GraphDelta(new_entities=list(entities), new_edges=new_edges, confidence_changes=changes,
+                      updated_edges=updated_edges)
 
 
 class GraphWriter(Protocol):
@@ -81,21 +84,21 @@ def commit_delta(delta: GraphDelta, writer: GraphWriter) -> None:
         writer.upsert_entity(entity)
     for edge in delta.new_edges:
         writer.upsert_edge(edge)
-    for subject, relation, object_, _before, after in delta.confidence_changes:
-        # Confidence changes identify an existing edge; retain its provenance
-        # rather than replacing it with a metadata-free edge.
+    for index, (subject, relation, object_, _before, after) in enumerate(delta.confidence_changes):
+        if index < len(delta.updated_edges):
+            merged = delta.updated_edges[index]
+            if merged.confidence != after:
+                raise ValueError("updated edge confidence does not match delta")
+            writer.upsert_edge(merged)
+            continue
+        # Backward-compatible deltas retain existing provenance when no full
+        # merged edge is supplied.
         existing = writer.get_edge(subject, relation, object_)
         if existing is None:
             raise KeyError(f"confidence change targets missing edge: {subject}, {relation}, {object_}")
-        writer.upsert_edge(GraphEdge(
-            existing.subject,
-            existing.relation,
-            existing.object,
-            after,
-            existing.source_ref,
-            existing.evidence,
-            existing.scope_conditions,
-        ))
+        writer.upsert_edge(GraphEdge(existing.subject, existing.relation, existing.object, after,
+                                     existing.source_ref, existing.evidence,
+                                     existing.scope_conditions))
 
 
 @dataclass
