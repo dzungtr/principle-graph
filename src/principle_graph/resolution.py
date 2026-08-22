@@ -22,6 +22,7 @@ class Entity:
     name: str
     type: str
     aliases: tuple[str, ...] = ()
+    embedding: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,32 @@ class SessionRegistry:
         key = (normalize_name(name), entity_type)
         return self.entities.get(key) or self.aliases.get(key)
 
+    def fuzzy_matches(self, name: str, entity_type: str) -> list[ResolutionMatch]:
+        normalized = normalize_name(name)
+        matches = []
+        for entity in self.entities.values():
+            if entity.type != entity_type:
+                continue
+            score = max(SequenceMatcher(None, normalized, normalize_name(n)).ratio()
+                        for n in (entity.name,) + entity.aliases)
+            if score >= NAME_SIMILARITY:
+                matches.append(ResolutionMatch(entity, score, "session-fuzzy"))
+        return sorted(matches, key=lambda m: m.score, reverse=True)
+
+    def semantic_matches(self, embedding: Sequence[float], entity_type: str) -> list[ResolutionMatch]:
+        def cosine(left: Sequence[float], right: Sequence[float]) -> float:
+            dot = sum(a * b for a, b in zip(left, right))
+            norm_left = sum(a * a for a in left) ** 0.5
+            norm_right = sum(a * a for a in right) ** 0.5
+            return dot / (norm_left * norm_right) if norm_left and norm_right else 0.0
+        matches = []
+        for entity in self.entities.values():
+            if entity.type == entity_type and entity.embedding is not None:
+                score = cosine(embedding, entity.embedding)
+                if score >= EMBEDDING_SIMILARITY:
+                    matches.append(ResolutionMatch(entity, score, "session-embedding"))
+        return sorted(matches, key=lambda m: m.score, reverse=True)
+
 
 class EntityResolver:
     """Resolve extracted names; graph access is injected to keep this stage testable."""
@@ -100,6 +127,20 @@ class EntityResolver:
         if session_entity:
             match = ResolutionMatch(session_entity, 1.0, "session")
             return Resolution("auto-resolve", candidate, entity_type, session_entity, (match,))
+
+        # Apply the same thresholds to identities created earlier in this session.
+        session_fuzzy = self.registry.fuzzy_matches(candidate, entity_type)
+        if len(session_fuzzy) == 1:
+            return Resolution("auto-resolve", candidate, entity_type, session_fuzzy[0].entity, tuple(session_fuzzy))
+        if len(session_fuzzy) > 1:
+            return self._queue(candidate, entity_type, source_ref, session_fuzzy)
+        if embedding is None and self.embedder is not None:
+            embedding = self.embedder.embed(candidate)
+        session_semantic = self.registry.semantic_matches(embedding, entity_type) if embedding is not None else []
+        if session_semantic:
+            if len(session_semantic) == 1 or session_semantic[0].score - session_semantic[1].score >= EMBEDDING_MARGIN:
+                return Resolution("auto-resolve", candidate, entity_type, session_semantic[0].entity, tuple(session_semantic))
+            return self._queue(candidate, entity_type, source_ref, session_semantic)
 
         exact = list(self.store.find_entities(candidate, entity_type))
         normalized = normalize_name(candidate)
@@ -135,15 +176,16 @@ class EntityResolver:
             evidence = [self.store.structural_corroboration(m.entity, neighbors) for m in semantic]
             semantic = [ResolutionMatch(m.entity, m.score, m.method, e)
                         for m, e in zip(semantic, evidence)]
+            if len(semantic) == 1 or semantic[0].score - semantic[1].score >= EMBEDDING_MARGIN:
+                return Resolution("auto-resolve", candidate, entity_type, semantic[0].entity, tuple(semantic))
             corroborated = [m for m in semantic if self._evidence_count(m.structural_evidence) >= 2]
             if len(corroborated) == 1:
                 return Resolution("auto-resolve", candidate, entity_type, corroborated[0].entity, tuple(semantic))
-            if len(semantic) == 1 or semantic[0].score - semantic[1].score >= EMBEDDING_MARGIN:
-                return Resolution("auto-resolve", candidate, entity_type, semantic[0].entity, tuple(semantic))
             return self._queue(candidate, entity_type, source_ref, semantic)
 
         self._created += 1
-        created = Entity(f"session:{self._created}", candidate, entity_type)
+        created = Entity(f"session:{self._created}", candidate, entity_type,
+                         embedding=tuple(embedding) if embedding is not None else None)
         self.registry.add(created)
         return Resolution("create", candidate, entity_type, created)
 
