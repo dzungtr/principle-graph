@@ -1,0 +1,103 @@
+"""Reduction, delta assembly, and approved graph commits."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Protocol, Sequence
+
+from .review import GraphDelta, GraphEdge, GraphEntity
+
+
+def aggregate_confidence(previous: float, event: float, *, independent: bool = True) -> float:
+    """Combine extraction support, ignoring repeated events from one source."""
+    previous = max(0.0, min(1.0, previous))
+    event = max(0.0, min(1.0, event))
+    if not independent:
+        return previous
+    return max(0.0, min(1.0, 1 - (1 - previous) * (1 - event)))
+
+
+def _key(edge: GraphEdge) -> tuple[str, str, str]:
+    return edge.subject, edge.relation.upper(), edge.object
+
+
+def reduce_edges(edges: Sequence[GraphEdge]) -> list[GraphEdge]:
+    """Reduce repeated endpoint/relation triples to one edge and retain evidence."""
+    reduced: dict[tuple[str, str, str], GraphEdge] = {}
+    seen_sources: dict[tuple[str, str, str], set[str]] = {}
+    for edge in edges:
+        if not 0 <= edge.confidence <= 1:
+            raise ValueError("confidence must be between 0.0 and 1.0")
+        key = _key(edge)
+        evidence = tuple(edge.evidence) if edge.evidence else (() if not edge.source_ref else (edge.source_ref,))
+        if key not in reduced:
+            reduced[key] = GraphEdge(edge.subject, edge.relation.upper(), edge.object,
+                                     edge.confidence, edge.source_ref, evidence,
+                                     edge.scope_conditions)
+            seen_sources[key] = {edge.source_ref} if edge.source_ref else set()
+            continue
+        prior = reduced[key]
+        source_is_new = bool(edge.source_ref) and edge.source_ref not in seen_sources[key]
+        merged_evidence = prior.evidence + tuple(item for item in evidence if item not in prior.evidence)
+        reduced[key] = GraphEdge(
+            prior.subject, prior.relation, prior.object,
+            aggregate_confidence(prior.confidence, edge.confidence, independent=source_is_new),
+            edge.source_ref or prior.source_ref,
+            merged_evidence,
+            edge.scope_conditions or prior.scope_conditions,
+        )
+        if edge.source_ref:
+            seen_sources[key].add(edge.source_ref)
+    return list(reduced.values())
+
+
+def assemble_delta(candidates: Sequence[GraphEdge], existing: Sequence[GraphEdge] = (),
+                   entities: Sequence[GraphEntity] = ()) -> GraphDelta:
+    """Build additions and confidence changes without mutating the permanent graph."""
+    proposed = reduce_edges(candidates)
+    current = {_key(edge): edge for edge in existing}
+    new_edges: list[GraphEdge] = []
+    changes: list[tuple[str, str, str, float, float]] = []
+    for edge in proposed:
+        old = current.get(_key(edge))
+        if old is None:
+            new_edges.append(edge)
+        else:
+            merged = reduce_edges([old, edge])[0]
+            if merged.confidence != old.confidence or merged.evidence != old.evidence:
+                changes.append((edge.subject, edge.relation, edge.object, old.confidence, merged.confidence))
+    return GraphDelta(new_entities=list(entities), new_edges=new_edges, confidence_changes=changes)
+
+
+class GraphWriter(Protocol):
+    def upsert_entity(self, entity: GraphEntity) -> None: ...
+    def upsert_edge(self, edge: GraphEdge) -> None: ...
+    def record_rejected(self, record: dict[str, object]) -> None: ...
+
+
+def commit_delta(delta: GraphDelta, writer: GraphWriter) -> None:
+    """Commit only an approved delta. Rejected review records are never passed here."""
+    for entity in delta.new_entities:
+        writer.upsert_entity(entity)
+    for edge in delta.new_edges:
+        writer.upsert_edge(edge)
+    for subject, relation, object_, _before, after in delta.confidence_changes:
+        writer.upsert_edge(GraphEdge(subject, relation, object_, after))
+
+
+@dataclass
+class InMemoryGraph:
+    """Small graph writer used by the prototype and deterministic tests."""
+    entities: list[GraphEntity] = field(default_factory=list)
+    edges: dict[tuple[str, str, str], GraphEdge] = field(default_factory=dict)
+    rejected: list[dict[str, object]] = field(default_factory=list)
+
+    def upsert_entity(self, entity: GraphEntity) -> None:
+        if entity not in self.entities:
+            self.entities.append(entity)
+
+    def upsert_edge(self, edge: GraphEdge) -> None:
+        key = _key(edge)
+        self.edges[key] = edge
+
+    def record_rejected(self, record: dict[str, object]) -> None:
+        self.rejected.append(record)

@@ -18,6 +18,8 @@ class GraphEdge:
     object: str
     confidence: float
     source_ref: str = ""
+    evidence: tuple[str, ...] = ()
+    scope_conditions: str = ""
 
 
 @dataclass(frozen=True)
