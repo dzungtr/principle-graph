@@ -1,0 +1,4 @@
+docs/demo
+.worktrees
+.pi-subagents
+__pycache__
