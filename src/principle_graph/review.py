@@ -18,6 +18,8 @@ class GraphEdge:
     object: str
     confidence: float
     source_ref: str = ""
+    evidence: tuple[str, ...] = ()
+    scope_conditions: str = ""
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,8 @@ class GraphDelta:
     new_edges: list[GraphEdge] = field(default_factory=list)
     merges: list[tuple[str, str]] = field(default_factory=list)
     confidence_changes: list[tuple[str, str, str, float, float]] = field(default_factory=list)
+    # Full merged edges for confidence changes, including provenance.
+    updated_edges: list[GraphEdge] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
