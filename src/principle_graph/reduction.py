@@ -64,7 +64,8 @@ def assemble_delta(candidates: Sequence[GraphEdge], existing: Sequence[GraphEdge
             new_edges.append(edge)
         else:
             merged = reduce_edges([old, edge])[0]
-            if merged.confidence != old.confidence or merged.evidence != old.evidence:
+            if (merged.confidence != old.confidence or merged.evidence != old.evidence
+                    or merged.scope_conditions != old.scope_conditions):
                 changes.append((edge.subject, edge.relation, edge.object, old.confidence, merged.confidence))
                 updated_edges.append(merged)
     return GraphDelta(new_entities=list(entities), new_edges=new_edges, confidence_changes=changes,

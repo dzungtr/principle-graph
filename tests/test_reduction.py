@@ -56,5 +56,18 @@ def test_same_source_commit_keeps_existing_provenance():
     assert graph.edges[("a", "R", "b")].evidence == ("evidence",)
 
 
+def test_same_source_scope_change_emits_and_commits_delta():
+    graph = InMemoryGraph()
+    first = GraphEdge("a", "r", "b", .5, "book:page-1", ("evidence",), "old scope")
+    commit_delta(assemble_delta([first]), graph)
+
+    refined = GraphEdge("a", "r", "b", .5, "book:page-1", ("evidence",), "new scope")
+    delta = assemble_delta([refined], existing=list(graph.edges.values()))
+    assert delta.confidence_changes == [("a", "R", "b", .5, .5)]
+    assert delta.updated_edges == [GraphEdge("a", "R", "b", .5, "book:page-1", ("evidence",), "new scope")]
+    commit_delta(delta, graph)
+    assert graph.edges[("a", "R", "b")].scope_conditions == "new scope"
+
+
 def test_aggregation_is_clamped():
     assert aggregate_confidence(2, 2) == 1
