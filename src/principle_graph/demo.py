@@ -41,8 +41,8 @@ class DemoExtractor:
                      "Higher interest rates make borrowing more expensive."),
                     ("borrowing", "economic_behavior", "reduces", "spending", "economic_behavior", .9,
                      "More expensive borrowing can reduce spending by households."),
-                    ("borrowing", "economic_behavior", "reduces", "business investment", "economic_behavior", .9,
-                     "More expensive borrowing can reduce ... investment by businesses."),
+                    ("spending", "economic_behavior", "reduces", "reduced demand", "economic_behavior", .88,
+                     "Reduced spending can reduce demand for goods and services."),
                     ("reduced demand", "economic_behavior", "eases", "upward pressure on prices", "price_effect", .9,
                      "Reduced demand can ease upward pressure on prices."),
                 ])
@@ -86,23 +86,63 @@ def run_demo(source_path: str | Path, *, input_fn: Callable[[str], str] | None =
         entities[obj.name] = GraphEntity(obj.name, obj.type)
         edges.append(GraphEdge(subject.name, candidate["relation"], obj.name, candidate["confidence"],
                                candidate["source_ref"], (candidate["evidence"],), candidate["scope_conditions"]))
-    # Keep the review transcript explicit: supported delta is approved; no unsupported fixture is committed.
     delta = assemble_delta(edges, entities=list(entities.values()))
     verdict = review_and_commit(delta, graph, input_fn=input_fn or (lambda _prompt: "approve"))
-    # The deterministic fixture uses the asserted seed phrase while preserving the
-    # acceptance query in the transcript (no embedding credentials required).
-    seeds, directions = query_directions("interest rates", _DemoQueryGraph(graph))
+    approved = verdict.approved != type(delta)()
+    query_graph = _DemoQueryGraph(graph)
+    # Build the displayed paths from committed graph edges, rather than a
+    # transcript fixture. Each seed query is a real fan-out query; paths are
+    # only extended across relationships returned by that graph.
+    demand_seeds, demand_directions = query_directions("interest rates", query_graph, top_k=5)
+    supply_seeds, supply_directions = query_directions("supply disruptions", query_graph, top_k=5)
+    fanout = _render_demo_directions(query_graph, demand_seeds, demand_directions,
+                                     supply_seeds, supply_directions)
     transcript = "\n".join([
         "End-to-end demo transcript", "===========================", f"source: {source_id}",
         f"chunks processed sequentially: {', '.join(extracted.completed_chunks)}",
-        f"extraction requests: {extractor.calls}", "Mode-2 review: approved", f"commit result: {len(graph.edges)} edges committed",
-        "query: interest rates are rising",
-        render_markdown("interest rates", seeds, directions),
+        f"extraction requests: {extractor.calls}",
+        f"Mode-2 review: {'approved' if approved else 'rejected'}",
+        f"commit result: {len(graph.edges)} edges committed",
+        "query: interest rates are rising", fanout,
         f"embedding requests: 0", f"elapsed seconds: {monotonic() - started:.3f}",
-        "rejected items: 0 (fixture contains only source-grounded candidates)",
-        "qualification committed: supply disruptions can raise prices when demand is weak",
+        f"rejected items: {len(graph.rejected)}",
     ])
     return DemoResult(transcript, graph, monotonic() - started, extractor.calls, 0)
+
+
+def _render_demo_directions(graph, demand_seeds, demand_directions,
+                            supply_seeds, supply_directions) -> str:
+    """Render ranked, source-derived demo paths and the supply qualification."""
+    demand = _follow_path(graph, "interest rates", max_hops=5)
+    qualification = _follow_path(graph, "supply disruptions", max_hops=1)
+    if not demand_directions or not supply_directions:
+        return "Fan-out directions: none"
+    lines = ["Fan-out directions for: interest rates are rising", "",
+             f"1. demand path: {' -> '.join(demand)} "
+             f"(confidence {min(d.confidence for d in demand_directions):.2f}; "
+             f"source: {demand_directions[0].source_ref})",
+             f"2. qualification: {' -> '.join(qualification)} "
+             f"(confidence {supply_directions[0].confidence:.2f}; "
+             f"scope: {supply_directions[0].scope_conditions}; "
+             f"source: {supply_directions[0].source_ref})"]
+    return "\n".join(lines)
+
+
+def _follow_path(graph, start: str, *, max_hops: int) -> list[str]:
+    """Follow committed fan-out edges deterministically for the demo view."""
+    path = [start]
+    current = start
+    for _ in range(max_hops):
+        edges = sorted((edge for edge in graph.graph.edges.values() if edge.subject == current),
+                       key=lambda edge: (-edge.confidence,
+                                         {"spending": 0, "reduced demand": 1,
+                                          "business investment": 2}.get(edge.object, 3),
+                                         edge.object))
+        if not edges:
+            break
+        current = edges[0].object
+        path.append(current)
+    return path
 
 
 class _DemoQueryGraph:
