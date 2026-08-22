@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Callable
+from typing import Callable, Protocol
+
+
+class _GraphWriter(Protocol):
+    def record_rejected(self, record: dict[str, object]) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,7 @@ def render_delta(delta: GraphDelta) -> str:
     lines.append("New edges:")
     lines.extend(
         f"  + {edge.subject} -[{edge.relation}, confidence {edge.confidence:.2f}]-> {edge.object}"
+        + (f" (source: {edge.source_ref})" if edge.source_ref else "")
         for edge in delta.new_edges
     )
     lines.append("Entity merges:")
@@ -65,7 +70,7 @@ def review_delta(delta: GraphDelta, input_fn: Callable[[str], str] = input) -> R
         if decision in {"a", "approve"}:
             return ReviewResult(delta, rejected)
         if decision in {"r", "reject"}:
-            rejected.append({"delta": delta, "decision": "rejected", "reason": "rejected by reviewer"})
+            rejected.extend(_rejection_records(delta))
             return ReviewResult(GraphDelta(), rejected)
         if decision in {"e", "edit"}:
             if not delta.new_edges:
@@ -84,3 +89,38 @@ def review_delta(delta: GraphDelta, input_fn: Callable[[str], str] = input) -> R
             print(render_delta(delta))
             continue
         print("Choose approve, reject, or edit.")
+
+
+def _rejection_records(delta: GraphDelta) -> list[dict[str, object]]:
+    """Build auditable records while retaining the candidate's provenance."""
+    edges = delta.new_edges
+    if not edges:
+        return [{"delta": delta, "decision": "rejected", "reason": "rejected by reviewer"}]
+    return [
+        {
+            "delta": delta,
+            "candidate": edge,
+            "subject": edge.subject,
+            "relation": edge.relation,
+            "object": edge.object,
+            "source_ref": edge.source_ref,
+            "evidence": edge.evidence,
+            "scope_conditions": edge.scope_conditions,
+            "decision": "rejected",
+            "reason": "rejected by reviewer",
+        }
+        for edge in edges
+    ]
+
+
+def review_and_commit(delta: GraphDelta, writer: _GraphWriter,
+                      input_fn: Callable[[str], str] = input) -> ReviewResult:
+    """Review a complete delta and commit only the approved verdict."""
+    from .reduction import commit_delta
+
+    result = review_delta(delta, input_fn=input_fn)
+    for record in result.rejected:
+        writer.record_rejected(record)
+    if result.approved != GraphDelta():
+        commit_delta(result.approved, writer)
+    return result
