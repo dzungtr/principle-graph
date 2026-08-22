@@ -42,10 +42,24 @@ def test_markdown_chunks_retain_heading_and_source_order():
     chunks = chunk_markdown("# Chapter\nintro\n## Section\nbody")
     assert [chunk.text for chunk in chunks] == ["# Chapter\nintro", "## Section\nbody"]
     assert chunks[1].section_path == ("Chapter", "Section")
-    assert [chunk.id for chunk in chunks] == ["section-1", "section-2"]
+    assert [chunk.id for chunk in chunks] == ["chunk-1", "chunk-2"]
+    assert chunks[0].source_ref == "markdown:chunk-1"
 
 
 def test_pdf_chunks_retain_page_numbers_and_paragraph_boundaries():
     chunks = chunk_pdf_pages(["first paragraph\n\nsecond paragraph", "third"])
     assert [chunk.text for chunk in chunks] == ["first paragraph", "second paragraph", "third"]
     assert [chunk.pages for chunk in chunks] == [(1,), (1,), (2,)]
+    assert [chunk.source_ref for chunk in chunks] == ["pdf:chunk-1", "pdf:chunk-2", "pdf:chunk-3"]
+
+
+def test_pdf_chunk_crossing_page_break_keeps_page_range():
+    chunks = chunk_pdf_pages(["Chapter 1\n\nA paragraph", "continued paragraph"])
+    assert len(chunks) == 2
+    assert chunks[-1].text == "A paragraph\ncontinued paragraph"
+    assert chunks[-1].pages == (1, 2)
+
+
+def test_markdown_source_id_is_traceable():
+    chunk = chunk_markdown("# Intro\ntext", source_id="book-1")[0]
+    assert chunk.source_ref == "book-1:chunk-1"
