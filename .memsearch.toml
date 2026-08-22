@@ -1,2 +1,6 @@
 collection = "principle_graph"
 paths = ["docs/"]
+
+[embedding]
+provider = "ollama"
+base_url = "http://localhost:11434"
