@@ -75,23 +75,42 @@ def chunk_markdown(source: str, source_id: str = "markdown") -> list[Chunk]:
     return chunks
 
 
+_CONTINUATION_WORDS = frozenset(
+    "a an and as at by for from in of on or than that the to with".split()
+)
+
+
+def _looks_like_page_continuation(text: str, next_paragraph: str) -> bool:
+    """Return whether a page's final paragraph probably continues on the next page.
+
+    PDF extraction does not preserve the layout signal distinguishing a paragraph
+    break from a page break.  Be conservative: punctuation, a hyphen, or a
+    sentence ending in a conjunction/preposition is useful evidence of a wrapped
+    sentence; an arbitrary unterminated phrase is not.
+    """
+    if not text or not next_paragraph or re.match(r"^(chapter\s+\d+|\d+(?:\.\d+)*\s+\S.+)$", next_paragraph, re.I):
+        return False
+    if text.endswith((",", ";", ":", "-", "—")):
+        return True
+    if re.search(r"\b(?:" + "|".join(_CONTINUATION_WORDS) + r")$", text, re.I):
+        return True
+    return False
+
+
 def chunk_pdf_pages(pages: list[str], source_id: str = "pdf") -> list[Chunk]:
-    """Chunk extracted PDF pages, joining paragraphs that cross page breaks."""
+    """Chunk extracted PDF pages, joining likely paragraphs crossing page breaks."""
     chunks: list[Chunk] = []
     ordinal = 0
-    prior_page_had_heading = False
     for page_number, page in enumerate(pages, 1):
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", page.strip()) if p.strip()]
-        page_had_heading = any(re.match(r"^(chapter\s+\d+|\d+(?:\.\d+)*\s+\S.+)$", p, re.I) for p in paragraphs)
         for paragraph in paragraphs:
-            heading = re.match(r"^(chapter\s+\d+|\d+(?:\.\d+)*\s+\S.+)$", paragraph, re.I)
-            if chunks and chunks[-1].pages[-1] == page_number - 1 and prior_page_had_heading and not heading and not re.match(r"^(chapter\s+\d+|\d+(?:\.\d+)*)\b", paragraph, re.I):
+            if (chunks and chunks[-1].pages[-1] == page_number - 1
+                    and _looks_like_page_continuation(chunks[-1].text, paragraph)):
                 previous = chunks[-1]
                 chunks[-1] = Chunk(previous.id, previous.text + "\n" + paragraph, previous.section_path, previous.pages + (page_number,), previous.source_ref)
                 continue
             ordinal += 1
             chunks.append(_chunk(paragraph, ordinal, source_id, (), (page_number,)))
-        prior_page_had_heading = page_had_heading
     return chunks
 
 

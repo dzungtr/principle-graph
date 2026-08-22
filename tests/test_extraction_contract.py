@@ -54,10 +54,25 @@ def test_pdf_chunks_retain_page_numbers_and_paragraph_boundaries():
 
 
 def test_pdf_chunk_crossing_page_break_keeps_page_range():
-    chunks = chunk_pdf_pages(["Chapter 1\n\nA paragraph", "continued paragraph"])
+    chunks = chunk_pdf_pages(["Chapter 1\n\nA paragraph that", "continues on the next page."])
     assert len(chunks) == 2
-    assert chunks[-1].text == "A paragraph\ncontinued paragraph"
+    assert chunks[-1].text == "A paragraph that\ncontinues on the next page."
     assert chunks[-1].pages == (1, 2)
+
+
+def test_pdf_chunk_does_not_merge_separate_page_paragraphs():
+    chunks = chunk_pdf_pages(["Chapter 1\n\nfirst paragraph", "a separate new paragraph"])
+    assert [chunk.text for chunk in chunks] == [
+        "Chapter 1", "first paragraph", "a separate new paragraph"
+    ]
+    assert [chunk.pages for chunk in chunks] == [(1,), (1,), (2,)]
+
+
+def test_pdf_chunk_merges_unterminated_paragraph_without_heading():
+    chunks = chunk_pdf_pages(["the long paragraph continues onto the", "next page mid-sentence"])
+    assert len(chunks) == 1
+    assert chunks[0].text == "the long paragraph continues onto the\nnext page mid-sentence"
+    assert chunks[0].pages == (1, 2)
 
 
 def test_markdown_source_id_is_traceable():
