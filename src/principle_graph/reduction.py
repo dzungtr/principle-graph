@@ -71,6 +71,7 @@ def assemble_delta(candidates: Sequence[GraphEdge], existing: Sequence[GraphEdge
 class GraphWriter(Protocol):
     def upsert_entity(self, entity: GraphEntity) -> None: ...
     def upsert_edge(self, edge: GraphEdge) -> None: ...
+    def get_edge(self, subject: str, relation: str, object_: str) -> GraphEdge | None: ...
     def record_rejected(self, record: dict[str, object]) -> None: ...
 
 
@@ -81,7 +82,20 @@ def commit_delta(delta: GraphDelta, writer: GraphWriter) -> None:
     for edge in delta.new_edges:
         writer.upsert_edge(edge)
     for subject, relation, object_, _before, after in delta.confidence_changes:
-        writer.upsert_edge(GraphEdge(subject, relation, object_, after))
+        # Confidence changes identify an existing edge; retain its provenance
+        # rather than replacing it with a metadata-free edge.
+        existing = writer.get_edge(subject, relation, object_)
+        if existing is None:
+            raise KeyError(f"confidence change targets missing edge: {subject}, {relation}, {object_}")
+        writer.upsert_edge(GraphEdge(
+            existing.subject,
+            existing.relation,
+            existing.object,
+            after,
+            existing.source_ref,
+            existing.evidence,
+            existing.scope_conditions,
+        ))
 
 
 @dataclass
@@ -98,6 +112,9 @@ class InMemoryGraph:
     def upsert_edge(self, edge: GraphEdge) -> None:
         key = _key(edge)
         self.edges[key] = edge
+
+    def get_edge(self, subject: str, relation: str, object_: str) -> GraphEdge | None:
+        return self.edges.get(_key(GraphEdge(subject, relation, object_, 0.0)))
 
     def record_rejected(self, record: dict[str, object]) -> None:
         self.rejected.append(record)

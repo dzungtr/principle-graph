@@ -30,5 +30,20 @@ def test_commit_only_writes_approved_delta():
     assert graph.rejected == []
 
 
+def test_two_pass_commit_preserves_existing_edge_provenance():
+    graph = InMemoryGraph()
+    first = GraphEdge("a", "r", "b", .5, "book:page-1", ("first evidence",), "when applicable")
+    commit_delta(assemble_delta([first]), graph)
+
+    second = GraphEdge("a", "r", "b", .5, "book:page-2", ("second evidence",), "when applicable")
+    commit_delta(assemble_delta([second], existing=list(graph.edges.values())), graph)
+
+    edge = graph.edges[("a", "R", "b")]
+    assert edge.confidence == .75
+    assert edge.source_ref == first.source_ref
+    assert edge.evidence == first.evidence
+    assert edge.scope_conditions == first.scope_conditions
+
+
 def test_aggregation_is_clamped():
     assert aggregate_confidence(2, 2) == 1
