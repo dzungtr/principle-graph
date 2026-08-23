@@ -68,18 +68,65 @@ pg query "interest rates are rising" --top-k 10 --max-edges-per-seed 20
 Run `pg query --help` for all options. Queries require a reachable Neo4j instance
 and data already committed to the graph.
 
-## Ingestion and demo status
+## Ingest
 
-The acceptance walkthrough documents the intended end-to-end demo:
+`pg ingest <path>` runs the full pipeline (load source by extension, chunk,
+sequential extraction, resolution, delta assembly, Mode-2 review, commit, stats)
+in one blocking invocation:
 
 ```sh
-# See docs/demo/acceptance-walkthrough.md for the acceptance procedure.
-pg ingest docs/demo/demo-source.md
+pg ingest path/to/source.md
+pg ingest path/to/source.pdf
 ```
 
-The current `pg` CLI registers only `check`, `init`, and `query`; `pg ingest` is
-not yet an available subcommand. The ingestion pipeline is covered by the test
-suite, but the interactive ingest command has not been exposed by the CLI.
+### Environment
+
+`pg ingest` reads the same `.env` settings as the rest of the CLI. The relevant
+variables (all optional; defaults shown):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `APERTURE_BASE_URL` | `http://localhost:8000` | OpenAI-compatible extraction gateway |
+| `LLM_MODEL` / `APERTURE_MODEL` | `z-ai/glm-5.2` | Extraction model id |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local bge-m3 embeddings service |
+| `OLLAMA_MODEL` | `bge-m3` | Embedding model id |
+| `PG_REJECTED_LOG_PATH` | `.pg/rejected.jsonl` | Where rejected review records are appended |
+
+### Pre-flight and exit codes
+
+Before any model spend, `pg ingest` checks that Neo4j is reachable and that
+the uniqueness constraint plus vector index are present. Failures print the
+remediation command on stderr and exit non-zero:
+
+- **1** — pre-flight failed (`pg check` / `pg init` hint printed)
+- **2** — source path missing
+- **3** — orchestrator error during the run
+- **4** — Mode-2 review rejected the delta (nothing committed, JSONL log appended)
+- **0** — approved and committed
+
+Gateway and Ollama are intentionally NOT pre-flighted; their errors surface on
+the first real call.
+
+### Degraded mode (Ollama offline)
+
+When Ollama is unreachable the embedder seam degrades gracefully: it warns once
+and returns `None`, the semantic resolution layer is skipped, and the alias and
+structural layers still run. Entities ingested without embeddings can be
+re-embedded later once the service is back.
+
+## Tests
+
+Run the full suite from the repository root:
+
+```sh
+PYTHONPATH=src python -m pytest -q
+```
+
+Run the demo tests only:
+
+```sh
+PYTHONPATH=src python -m pytest tests/test_demo.py -v
+```
 
 ## Tests
 
