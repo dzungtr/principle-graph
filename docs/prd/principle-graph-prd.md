@@ -1,6 +1,6 @@
 # Principle Graph — Initial PRD
 
-**Status:** Draft v0.1
+**Status:** v1.0 — MVP implemented and merged (2026-08-23)
 **Owner:** Dzung Tran
 **Date:** 2026-08-02
 
