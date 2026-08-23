@@ -10,6 +10,23 @@ from urllib import request
 from .config import Settings
 
 
+class CallCounter:
+    """Lightweight instrumentation hook for any callable.
+
+    Embedding providers and clients wrap their underlying request callable so the
+    orchestrator can report accurate per-call request counts in the ingest
+    transcript without needing a dedicated per-provider API.
+    """
+
+    def __init__(self, target: Callable[..., Any]) -> None:
+        self.target = target
+        self.calls = 0
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        return self.target(*args, **kwargs)
+
+
 class OllamaEmbedder:
     """Fetch bge-m3 embeddings from a local Ollama service.
 
@@ -24,16 +41,18 @@ class OllamaEmbedder:
         self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
         self.model = model or settings.ollama_model
         self.timeout = timeout
-        self._http_client = http_client
+        self._http_client = http_client or request.urlopen
         self._warned = False
+        self.calls: int = 0
 
     def embed(self, name: str) -> Sequence[float] | None:
         """Return the 1024-dimensional embedding for *name*, or ``None`` on error."""
+        self.calls += 1
         payload = json.dumps({"model": self.model, "prompt": name}).encode("utf-8")
         req = request.Request(f"{self.base_url}/api/embeddings", data=payload,
                               headers={"Content-Type": "application/json"}, method="POST")
         try:
-            opener = self._http_client or request.urlopen
+            opener = self._http_client
             response = opener(req, timeout=self.timeout)
             if hasattr(response, "__enter__"):
                 with response as active:
