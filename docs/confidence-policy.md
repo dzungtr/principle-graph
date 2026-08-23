@@ -42,7 +42,9 @@ A candidate rejected at the Mode-2 review checkpoint is **never committed** to t
 never contributes confidence. It is retained in the task's review/audit record as "considered and rejected", including the original candidate, evidence, scope conditions, source reference,
 rejection reason, and reviewer decision. Rejected records are not returned as graph edges during
 fan-out. They may be inspected later as provenance, but re-approval requires an explicit new
-review decision.
+review decision. In the ingest command the review/audit record is the local JSONL rejected
+log (default `.pg/rejected.jsonl`, env-overridable) — rejected records are not stored in
+the graph.
 
 This policy applies to the prototype's single-tenant graph and does not define conflict
 resolution between high-confidence claims.

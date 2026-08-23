@@ -1,2 +1,10 @@
 collection = "principle_graph"
 paths = ["docs/"]
+
+[milvus]
+# Connect to the Milvus server exposed by the Podman container.
+uri = "http://localhost:19530"
+
+[embedding]
+provider = "ollama"
+base_url = "http://localhost:11434"

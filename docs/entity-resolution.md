@@ -16,7 +16,7 @@ Checks run in this order, stopping when an outcome is decisive:
    auto-resolves. A fuzzy name match is eligible to auto-resolve only at a similarity of
    `0.90` or higher. Below `0.90`, continue to the next layer.
 2. **Semantic similarity:** compare the candidate embedding with existing entities of the
-   same type using Voyage cosine similarity. A score of `0.85` or higher is a semantic
+   same type using local `bge-m3` cosine similarity (ADR-0001). A score of `0.85` or higher is a semantic
    match; it auto-resolves only when the top candidate leads the second candidate by at
    least `0.05`. Otherwise, continue or queue as ambiguous. A score below `0.85` does not
    match.
@@ -34,9 +34,14 @@ allowed (they remain review-visible), consistent with the extraction contract.
 Queue a candidate when multiple existing entities remain plausible, scores straddle a
 threshold, or structural evidence conflicts with name/semantic evidence. The queue item
 contains the original candidate, ranked matches with scores, structural evidence, and the
-source/chunk reference. Mode 2 review surfaces the queue alongside the graph delta; human
-confirmation selects a canonical entity or approves creation. No ambiguous candidate is
-merged automatically.
+source/chunk reference. Mode 2 review surfaces the queue alongside the graph delta; no
+ambiguous candidate is merged automatically.
+
+**Amendment (ingest command v1, 2026-08-23):** queued candidates are rendered as review
+notes and default to **create-new**; interactive canonical-entity selection at review is
+deferred. The reviewer's escape hatch for a wrong queue note is rejecting the whole delta
+and rerunning. The semantic layer compares embeddings from the local `bge-m3` model
+(ADR-0001); thresholds are unchanged.
 
 ## Within-session policy
 

@@ -11,7 +11,7 @@ runnable DDL is [`neo4j-schema.cypher`](neo4j-schema.cypher).
 |---|---|---:|---|
 | `name` | string | yes | Canonical display name. |
 | `type` | string | yes | Domain/entity type (validated by extraction, not a Neo4j enum). |
-| `embedding` | list<float> | no | Voyage `voyage-3` embedding, 1024 dimensions. |
+| `embedding` | list<float> | no | Local Ollama `bge-m3` embedding, 1024 dimensions (ADR-0001). |
 | `created_at` | datetime | yes | First persistence time. |
 | `updated_at` | datetime | yes | Last mutation time. |
 
@@ -43,7 +43,7 @@ end Entity)`. Confidence aggregation and repeat-extraction behavior are specifie
 `docs/schema/neo4j-schema.cypher` applies:
 
 - a uniqueness constraint on `Entity(name, type)`;
-- a 1024-dimensional cosine vector index on `Entity.embedding`, matching Voyage `voyage-3`.
+- a 1024-dimensional cosine vector index on `Entity.embedding`, matching the local `bge-m3` embedding model (ADR-0001).
 
 Neo4j property types are enforced by the application write layer (including confidence bounds,
 non-null required fields, and timestamp assignment). Neo4j does not support a property schema

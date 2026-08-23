@@ -1,4 +1,5 @@
-docs/demo
+demo
+.env
 .worktrees
 .pi-subagents
 __pycache__
