@@ -1,1 +1,0 @@
-"""Principle Graph prototype package."""
