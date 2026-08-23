@@ -16,7 +16,9 @@ class EntityResolutionSpecTests(unittest.TestCase):
     def test_spec_defines_outcomes_and_ambiguity_queue(self):
         for outcome in ("auto-resolve", "create", "ambiguity queue"):
             self.assertIn(outcome, SPEC)
-        self.assertIn("human\nconfirmation", SPEC)
+        # Amendment (ingest v1): interactive canonical-entity selection is deferred;
+        # queued candidates default to create-new.
+        self.assertIn("create-new", SPEC)
 
     def test_spec_distinguishes_within_session_resolution(self):
         self.assertIn("Within-session", SPEC)
