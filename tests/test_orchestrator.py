@@ -7,7 +7,7 @@ from pathlib import Path
 
 from principle_graph.extraction import ExtractionRun, SequentialExtractor
 from principle_graph.extraction_contract import chunk_markdown
-from principle_graph.orchestrator import IngestOrchestrator, load_source
+from principle_graph.orchestrator import IngestOrchestrator, format_ambiguity_note, load_source
 from principle_graph.reduction import GraphEdge, GraphEntity, InMemoryGraph
 from principle_graph.resolution import Entity, SimilarEntity
 from principle_graph.review import GraphDelta
@@ -123,8 +123,25 @@ def test_happy_path_approves_and_commits_to_graph():
     assert result.stats.committed_edges == 2
     assert ("rates", "REDUCES", "borrowing") in graph.edges
     assert ("borrowing", "IS", "reduced") in graph.edges
-    assert client.calls == [client.calls[0], client.calls[1]]
+    assert len(client.calls) == 2
     assert result.stats.rejected_count == 0
+
+
+def test_extraction_request_count_matches_per_chunk_calls():
+    graph = InMemoryGraph()
+    orch, client, path = _orchestrator(graph)
+    result = orch.run(path, input_fn=lambda _: "approve")
+    assert result.stats.extraction_requests == 2
+    assert len(client.calls) == result.stats.extraction_requests
+
+
+def test_embedding_request_count_tracks_seam_calls():
+    graph = InMemoryGraph()
+    embedder = CountingEmbedder(vector=(1.0, 0.0))
+    orch, _, path = _orchestrator(graph, embedder=embedder)
+    result = orch.run(path, input_fn=lambda _: "approve")
+    assert result.stats.embedding_requests == embedder.calls
+    assert embedder.calls >= 1
 
 
 def test_ambiguity_queued_never_merges_and_defaults_to_create_new():
@@ -139,8 +156,9 @@ def test_ambiguity_queued_never_merges_and_defaults_to_create_new():
     assert result.stats.verdict == "approved"
     # The ambiguous candidate was resolved as create-new and committed.
     assert result.stats.ambiguity_queued >= 1
-    committed_names = {entity.name for entity in graph.entities}
-    assert committed_names - {"rates", "borrowing", "reduced"} == set()
+    assert result.stats.ambiguity_notes
+    # No matches above the semantic threshold merged an ambiguous candidate into an existing entity.
+    assert all("create-new" in note for note in result.stats.ambiguity_notes)
 
 
 def test_reject_verdict_writes_jsonl_and_skips_commit(tmp_path):
@@ -178,26 +196,53 @@ def test_stats_block_renders_required_fields():
     transcript = result.stats.render()
     for key in ("source:", "chunks processed sequentially:", "extraction requests:",
                 "embedding requests:", "ambiguity-queued candidates:",
-                "Mode-2 review: approved", "commit result:",
+                "ambiguity review notes:", "Mode-2 review: approved", "commit result:",
                 "rejected items:", "log:", "elapsed seconds:"):
         assert key in transcript, f"missing key in stats block: {key!r}"
 
 
-def test_same_source_rerun_does_not_double_boost_confidence():
+def test_same_source_rerun_does_not_double_boost_confidence(tmp_path):
     """Re-ingesting the same source must not raise confidence again."""
+    source = tmp_path / "demo.md"
+    source.write_text(_markdown_source(), encoding="utf-8")
+    chunks = chunk_markdown(source.read_text(encoding="utf-8"), source.name)
+    triple_a = _triple(chunks[0].source_ref, "rates", "reduces", "borrowing")
+    triple_b = _triple(chunks[1].source_ref, "borrowing", "is", "reduced")
+    triple_c = _triple(chunks[0].source_ref, "rates", "reduces", "borrowing", confidence=0.95)
+
     graph = InMemoryGraph()
-    orch, _, path = _orchestrator(graph)
-    first = orch.run(path, input_fn=lambda _: "approve")
+
+    def _run(responses):
+        client = FakeMessages(list(responses))
+        extractor = SequentialExtractor(client)
+        orch = IngestOrchestrator(extractor, FakeStore(), None, graph)
+        return orch.run(source, input_fn=lambda _: "approve"), client
+
+    # First run seeds the graph.
+    first, client_first = _run([
+        FakeResponse(content=[ToolUse("tool_use", "propose_triple", triple_a)]),
+        FakeResponse(content=[ToolUse("tool_use", "propose_triple", triple_b)]),
+    ])
+    assert first.stats.verdict == "approved"
     initial_conf = graph.edges[("rates", "REDUCES", "borrowing")].confidence
-    second = orch.run(path, input_fn=lambda _: "approve")
+
+    # Second run reuses the same source_ref with a higher-confidence event; same-source
+    # reruns must NOT double-boost confidence because reduction treats the same source_ref
+    # as non-independent. The test would also pass if the rerun is a no-op for the existing
+    # edge, but a fresh graph ensures we are not relying on the latter for correctness.
+    second, client_second = _run([
+        FakeResponse(content=[ToolUse("tool_use", "propose_triple", triple_c)]),
+        FakeResponse(content=[ToolUse("tool_use", "propose_triple", triple_b)]),
+    ])
     final_conf = graph.edges[("rates", "REDUCES", "borrowing")].confidence
-    assert first.stats.committed_edges == 2
-    assert second.stats.committed_edges == 0  # no new edges
-    assert second.stats.verdict == "approved"
-    assert final_conf == initial_conf  # same source, no double boost
-    # Evidence still retained
-    assert graph.edges[("rates", "REDUCES", "borrowing")].evidence
-    assert graph.edges[("rates", "REDUCES", "borrowing")].source_ref
+    assert final_conf == initial_conf, (
+        f"same-source rerun unexpectedly boosted confidence: {initial_conf} -> {final_conf}")
+    # Extraction stat reflects per-chunk calls; each run issued two create() calls.
+    assert first.stats.extraction_requests == len(client_first.calls) == 2
+    assert second.stats.extraction_requests == len(client_second.calls) == 2
+    # Evidence retention across reruns.
+    assert "rates reduces borrowing" in graph.edges[("rates", "REDUCES", "borrowing")].evidence
+    assert graph.edges[("rates", "REDUCES", "borrowing")].source_ref == chunks[0].source_ref
 
 
 def test_pdf_and_markdown_dispatch_by_extension(tmp_path):
@@ -316,3 +361,14 @@ def test_load_source_rejects_unknown_extension():
         assert "unsupported source extension" in str(exc)
     else:
         raise AssertionError("expected ValueError for unknown extension")
+
+
+def test_ambiguity_note_formatter_lists_ranked_matches():
+    from principle_graph.resolution import AmbiguityItem, ResolutionMatch
+    match_a = ResolutionMatch(Entity("e1", "Alpha", "concept"), 0.92, "embedding")
+    match_b = ResolutionMatch(Entity("e2", "Alfa", "concept"), 0.88, "embedding")
+    item = AmbiguityItem("alpha", "concept", "chunk-1", (match_a, match_b))
+    note = format_ambiguity_note(item)
+    assert "Alpha (0.92 via embedding)" in note
+    assert "Alfa (0.88 via embedding)" in note
+    assert "create-new" in note

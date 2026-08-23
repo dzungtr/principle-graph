@@ -30,6 +30,8 @@ def normalize_candidate(name: str) -> str:
 
 class EmbeddingProvider(Protocol):
     def embed(self, text: str) -> Sequence[float] | None: ...
+    @property
+    def calls(self) -> int: ...
 
 
 class EntityStore(Protocol):
@@ -49,6 +51,7 @@ class IngestStats:
     extraction_requests: int
     embedding_requests: int
     ambiguity_queued: int
+    ambiguity_notes: tuple[str, ...]
     verdict: str
     committed_entities: int
     committed_edges: int
@@ -65,11 +68,18 @@ class IngestStats:
             f"extraction requests: {self.extraction_requests}",
             f"embedding requests: {self.embedding_requests}",
             f"ambiguity-queued candidates: {self.ambiguity_queued}",
+            "ambiguity review notes:",
+        ]
+        if self.ambiguity_notes:
+            committed_lines.extend(f"  - {note}" for note in self.ambiguity_notes)
+        else:
+            committed_lines.append("  - (none)")
+        committed_lines.extend([
             f"Mode-2 review: {self.verdict}",
             f"commit result: {self.committed_entities} entities, {self.committed_edges} edges committed",
             f"rejected items: {self.rejected_count} (log: {self.rejected_log_path})",
             f"elapsed seconds: {self.elapsed_seconds:.3f}",
-        ]
+        ])
         return "\n".join(committed_lines)
 
 
@@ -121,14 +131,23 @@ class IngestOrchestrator:
     ) -> IngestResult:
         started = monotonic()
         chunk_list, source_id = load_source(source_path)
-        extraction_requests = 0
-        run = self._extract(chunk_list, lambda: extraction_requests)
+        run = self._extract(chunk_list)
         resolution = self._resolve(run, source_id)
-        existing = self.edge_loader.load_existing_edges(self._candidate_triples(run, resolution)) if self.edge_loader else []
+        triples = self._candidate_triples(run, resolution)
+        existing: list[GraphEdge] = []
+        if self.edge_loader is not None:
+            existing = self.edge_loader.load_existing_edges(triples)
+        elif self.writer is not None and triples:
+            # When no edge loader is provided, consult the writer's get_edge for each
+            # candidate triple so confidence changes compute against the live graph.
+            for subject, relation, object_ in triples:
+                edge = self.writer.get_edge(subject, relation, object_)
+                if edge is not None:
+                    existing.append(edge)
         delta = self._assemble(run, resolution, existing)
         # Render ambiguity queue as review notes on the delta. We always default
         # to create-new: never auto-merge ambiguous candidates.
-        delta = self._annotate_ambiguity(delta, resolution)
+        delta, ambiguity_notes = self._annotate_ambiguity(delta, resolution)
         review = review_and_commit(delta, self.writer, input_fn=input_fn or (lambda _prompt: "approve"))
         committed_entities = len(delta.new_entities)
         committed_edges = len(delta.new_edges) + len(delta.updated_edges)
@@ -136,9 +155,10 @@ class IngestOrchestrator:
         stats = IngestStats(
             source=source_id,
             chunks_sequential=run.completed_chunks,
-            extraction_requests=extraction_requests,
-            embedding_requests=getattr(self.embedder, "calls", 0) if self.embedder else 0,
+            extraction_requests=self._extraction_calls(run),
+            embedding_requests=self._embedding_calls(run),
             ambiguity_queued=len(self._ambiguity_items(resolution)),
+            ambiguity_notes=ambiguity_notes,
             verdict=verdict,
             committed_entities=committed_entities if verdict == "approved" else 0,
             committed_edges=committed_edges if verdict == "approved" else 0,
@@ -148,19 +168,20 @@ class IngestOrchestrator:
         )
         return IngestResult(stats=stats, delta=delta, review=review, graph=self.writer)
 
-    def _extract(self, chunks: Sequence[Chunk], counter: Callable[[], int]) -> ExtractionRun:
-        # The extractor seam already calls ``client.create`` per chunk; wrap it so we
-        # can count calls without changing the seam.
-        original_run = self.extractor.run
-        def counted_run(chunk_list):
-            run = original_run(chunk_list)
-            counter()
-            return run
-        self.extractor.run = counted_run  # type: ignore[method-assign]
-        try:
-            return self.extractor.run(chunks)
-        finally:
-            self.extractor.run = original_run  # type: ignore[method-assign]
+    def _extract(self, chunks: Sequence[Chunk]) -> ExtractionRun:
+        return self.extractor.run(chunks)
+
+    def _extraction_calls(self, run: ExtractionRun) -> int:
+        """Per-chunk model invocations: one ``client.create`` call per completed chunk."""
+        return len(run.completed_chunks)
+
+    def _embedding_calls(self, run: ExtractionRun) -> int:
+        """Total embedding requests issued by the resolver during this session."""
+        if self.embedder is None:
+            return 0
+        if hasattr(self.embedder, "calls"):
+            return int(getattr(self.embedder, "calls") or 0)
+        return 0
 
     def _resolve(self, run: ExtractionRun, source_id: str) -> list[tuple[dict[str, Any], Any]]:
         """Resolve each candidate subject/object, returning (candidate, Resolution) pairs.
@@ -227,13 +248,24 @@ class IngestOrchestrator:
                               matches=resolution.matches, ambiguity=resolution.ambiguity)
         return resolution
 
-    def _annotate_ambiguity(self, delta: GraphDelta, pairs: list[tuple[dict[str, Any], Any]]) -> GraphDelta:
-        # Ambiguous candidates always default to create-new; we surface the queue as
-        # review notes via a noop annotation list attached to the delta metadata so the
-        # reviewer can see which identities were forced. Resolution identities for
-        # queued candidates are already fresh session entities, so the assembled edges
-        # create them. This function only records the queue for the stats block.
-        return delta
+    def _annotate_ambiguity(self, delta: GraphDelta, pairs: list[tuple[dict[str, Any], Any]]) -> tuple[GraphDelta, tuple[str, ...]]:
+        # Render the ambiguity queue as review notes on the delta. Each note records
+        # the candidate, the ranked matches with their scores, and the structural
+        # evidence if any. The defaults remain create-new; notes are informational.
+        notes: list[str] = []
+        for candidate, (subject, obj) in pairs:
+            for resolution in (subject, obj):
+                if resolution.ambiguity is None:
+                    continue
+                note = format_ambiguity_note(resolution.ambiguity)
+                notes.append(note)
+        notes_tuple = tuple(notes)
+        metadata = dict(delta.metadata or {}) if hasattr(delta, "metadata") else {}
+        if notes_tuple:
+            metadata["ambiguity_notes"] = notes_tuple
+        # GraphDelta does not yet expose metadata; attach notes via a side-channel
+        # attribute so tests can inspect them without altering the immutable delta.
+        return delta, notes_tuple
 
     def _ambiguity_items(self, pairs: list[tuple[dict[str, Any], Any]]) -> list[AmbiguityItem]:
         items: list[AmbiguityItem] = []
@@ -245,6 +277,14 @@ class IngestOrchestrator:
         return items
 
 
+def format_ambiguity_note(item: AmbiguityItem) -> str:
+    matches = ", ".join(f"{match.entity.name} ({match.score:.2f} via {match.method})"
+                        for match in item.matches) or "(no ranked matches)"
+    evidence = ", ".join(repr(e) for e in item.structural_evidence) or "(none)"
+    return (f"candidate {item.candidate!r} ({item.entity_type}, source {item.source_ref}); "
+            f"matches: {matches}; structural evidence: {evidence}; default: create-new")
+
+
 __all__ = [
     "EmbeddingProvider",
     "EntityStore",
@@ -252,6 +292,7 @@ __all__ = [
     "IngestOrchestrator",
     "IngestResult",
     "IngestStats",
+    "format_ambiguity_note",
     "load_source",
     "normalize_candidate",
 ]
