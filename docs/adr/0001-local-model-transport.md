@@ -14,4 +14,13 @@ The prototype stack named Claude via the Anthropic API for extraction and Voyage
 
 ## Measured results
 
-*(Filled at initiative close from PRD #35's Results section — live smoke stats: request counts, latency, committed graph counts.)*
+Promoted from PRD #35 Results (live smoke captured by PR #48 on a fresh Neo4j after `pg init`, scripted Mode-2 approval):
+
+- **Source:** local demo Markdown fixture, 3 sequential chunks.
+- **Models:** extraction via OpenAI-compatible gateway (`z-ai/glm-5.2` served by OpenRouter at `https://ai.tailbac57a.ts.net/v1`); embeddings via local Ollama `bge-m3` (1024-dim).
+- **Counts:** 3 extraction requests, 2 embedding requests, 0 ambiguity-queued candidates, 2 entities + 1 edge committed (`USED_BY`, confidence `0.80`), 0 rejected.
+- **Latency:** 23.795 seconds elapsed end-to-end.
+- **Configuration:** env-overridable per `Settings` / `.env.example` (`APERTURE_BASE_URL`, `LLM_MODEL` / `APERTURE_MODEL`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `PG_REJECTED_LOG_PATH`); gateway and Ollama are intentionally not pre-flighted so failures surface on first call rather than blocking ingest.
+- **Degraded mode:** when Ollama is unreachable, entities are stored without embeddings, the semantic resolution layer skips, and alias + structural layers still run.
+
+These numbers are the first production-like telemetry for the transport decision; subsequent runs are expected to scale linearly in chunk count and request counts until the gateway model or Neo4j writer becomes the bottleneck.
