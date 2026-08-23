@@ -1,0 +1,70 @@
+from dataclasses import dataclass
+
+from principle_graph.extraction import PROPOSE_TRIPLE_TOOL, SequentialExtractor
+from principle_graph.extraction_contract import chunk_markdown
+
+
+@dataclass
+class ToolUse:
+    type: str
+    name: str
+    input: dict
+
+
+@dataclass
+class Response:
+    content: list
+
+
+class FakeMessages:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return next(self.responses)
+
+
+def triple(source_ref, subject="rates"):
+    return {
+        "subject": subject, "subject_type": "policy_action", "relation": "reduces",
+        "object": "borrowing", "object_type": "economic_behavior", "confidence": .8,
+        "evidence": "The text links rates and borrowing.", "scope_conditions": "short run",
+        "source_ref": source_ref,
+    }
+
+
+def test_extracts_chunks_sequentially_and_stages_valid_candidates():
+    chunks = chunk_markdown("# One\nrates reduce borrowing.\n# Two\ninflation follows.", "book")
+    client = FakeMessages([
+        Response([ToolUse("tool_use", "propose_triple", triple(chunks[0].source_ref))]),
+        Response([]),
+    ])
+    run = SequentialExtractor(client).run(chunks)
+    assert [c["subject"] for c in run.candidates] == ["rates"]
+    assert run.completed_chunks == ["chunk-1", "chunk-2"]
+    assert [call["messages"][0]["content"] for call in client.calls] == [
+        "Extract from this chunk.\n\nsource_ref: book:chunk-1\nchunk_id: chunk-1\nsection_path: One\n\nchunk text:\n# One\nrates reduce borrowing.",
+        "Extract from this chunk.\n\nsource_ref: book:chunk-2\nchunk_id: chunk-2\nsection_path: Two\n\nchunk text:\n# Two\ninflation follows.",
+    ]
+    assert client.calls[0]["tools"] == [PROPOSE_TRIPLE_TOOL]
+
+
+def test_rejects_malformed_and_wrong_source_tool_calls():
+    chunks = chunk_markdown("# One\nrates reduce borrowing.", "book")
+    invalid = triple("wrong:chunk-1")
+    invalid["confidence"] = 2
+    client = FakeMessages([Response([ToolUse("tool_use", "propose_triple", invalid)])])
+    run = SequentialExtractor(client).run(chunks)
+    assert not run.candidates
+    assert len(run.rejected) == 1
+    assert "confidence" in run.rejected[0]["reason"]
+
+
+def test_ignores_non_tool_response_content():
+    chunks = chunk_markdown("# One\ntext", "book")
+    client = FakeMessages([Response([ToolUse("text", "", {})])])
+    run = SequentialExtractor(client).run(chunks)
+    assert run.candidates == []
+    assert run.rejected == []

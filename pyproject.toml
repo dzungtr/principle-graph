@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "principle-graph"
+version = "0.1.0"
+description = "Local knowledge graph memory prototype"
+requires-python = ">=3.12"
+dependencies = ["neo4j>=5.0,<6", "PyMuPDF>=1.24,<2"]
+
+[project.scripts]
+pg = "principle_graph.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
