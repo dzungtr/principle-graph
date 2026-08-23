@@ -15,6 +15,7 @@ class Settings:
     llm_model: str = "z-ai/glm-5.2"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "bge-m3"
+    rejected_log_path: str = ".pg/rejected.jsonl"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -27,4 +28,5 @@ class Settings:
             llm_model=os.getenv("LLM_MODEL", os.getenv("APERTURE_MODEL", cls.llm_model)),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", cls.ollama_base_url),
             ollama_model=os.getenv("OLLAMA_MODEL", cls.ollama_model),
+            rejected_log_path=os.getenv("PG_REJECTED_LOG_PATH", cls.rejected_log_path),
         )

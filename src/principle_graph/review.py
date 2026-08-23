@@ -13,6 +13,7 @@ class _GraphWriter(Protocol):
 class GraphEntity:
     name: str
     entity_type: str
+    embedding: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True)
