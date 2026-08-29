@@ -239,6 +239,26 @@ def _build_embedder(settings: Settings):
         return None
 
 
+def _interactive_input(prompt: str) -> str:
+    """Terminal input for the default interactive Mode-2 review.
+
+    EOF (e.g. piped stdin without ``--yes``) must not silently approve the
+    delta; fail with the opt-in hint instead.
+    """
+    try:
+        return input(prompt)
+    except EOFError as error:
+        raise RuntimeError(
+            "interactive Mode-2 review got no terminal input (stdin closed); "
+            "re-run with --yes for scripted approval"
+        ) from error
+
+
+def _scripted_approve(_prompt: str) -> str:
+    """Scripted approval wired by ``--yes`` for smoke runs and agents."""
+    return "approve"
+
+
 class _EdgeLoaderAdapter:
     """Adapt the module-level ``load_existing_edges`` function to the loader protocol."""
 
@@ -254,10 +274,17 @@ def ingest_command(
     settings: Settings,
     source_path: str,
     *,
+    yes: bool = False,
     input_fn: Callable[[str], str] | None = None,
     out=sys.stdout,
 ) -> int:
-    """Pre-flight, run the orchestrator, and emit the end-of-run stats block."""
+    """Pre-flight, run the orchestrator, and emit the end-of-run stats block.
+
+    Mode-2 review interaction: the default runs the interactive approve /
+    reject / edit-confidence loop on the terminal. ``yes=True`` opts into
+    scripted approval for smoke runs and agents. An explicit ``input_fn``
+    (programmatic/test callers) takes precedence over both.
+    """
     path = Path(source_path)
     if not path.exists():
         print(f"Source not found: {source_path}", file=sys.stderr)
@@ -269,8 +296,14 @@ def ingest_command(
         print(f"Hint: {error.remediation}", file=sys.stderr)
         return 1
     orchestrator, driver = build_orchestrator(settings)
+    if input_fn is not None:
+        review_input: Callable[[str], str] = input_fn
+    elif yes:
+        review_input = _scripted_approve
+    else:
+        review_input = _interactive_input
     try:
-        result = orchestrator.run(path, input_fn=input_fn)
+        result = orchestrator.run(path, input_fn=review_input)
     except Exception as error:
         print(f"Ingest failed: {error}", file=sys.stderr)
         return 3
@@ -296,7 +329,9 @@ def main(argv: list[str] | None = None) -> int:
                                                      args.max_edges_per_seed, args.format))
     ingest = subparsers.add_parser("ingest", help="ingest a Markdown or PDF source")
     ingest.add_argument("path", help="path to a .md/.markdown or .pdf source")
-    ingest.set_defaults(handler=lambda: ingest_command(Settings.from_env(), args.path))
+    ingest.add_argument("--yes", action="store_true",
+                        help="approve the Mode-2 delta without prompting (smoke runs and agents)")
+    ingest.set_defaults(handler=lambda: ingest_command(Settings.from_env(), args.path, yes=args.yes))
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
