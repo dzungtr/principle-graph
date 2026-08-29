@@ -5,11 +5,20 @@ Status: accepted for the prototype (2026-08-22)
 ## Input and seed matching
 
 `pg query "<new information>"` accepts free-form text. The query is embedded with the
-same Voyage model used for entity resolution, then matched against permanent graph entities
-by embedding similarity. Exact normalized name and aliases matches are included first; semantic
-matches use the entity-resolution threshold of `0.85`. Only the best matching seed entities
+same model used for entity resolution, then matched against permanent graph entities
+by embedding similarity. Exact normalized name and aliases matches are included first
+(score 1.0); semantic matches use the query-seeding threshold, which is separate from
+and lower than the entity-resolution threshold of `0.85`, because sentence-to-name
+cosine similarity tops out well below it (measured ≈0.72 on the demo graph). The
+default query-seeding threshold is `0.60`, configurable via the
+`PG_QUERY_SEED_SIMILARITY` environment variable (values outside (0, 1] fall back to
+the default). Only the best matching seed entities
 are used, and their match score is retained for explainability. A query with no matching seeds
 returns an empty result with a clear `no matching seeds` message.
+
+When the Ollama embedder is unreachable, the command degrades to exact-name matching
+only, and states the degradation explicitly via a stderr notice (the JSON output shape
+is unaffected).
 
 ## Candidate directions
 

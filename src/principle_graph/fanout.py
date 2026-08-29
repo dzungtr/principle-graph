@@ -6,8 +6,17 @@ from typing import Protocol, Sequence
 import math
 import re
 
-from .resolution import EMBEDDING_SIMILARITY, Entity, normalize_name
+from .resolution import Entity, normalize_name
 from .review import GraphEdge
+
+# Seeding free-form queries against entity names tops out well below the
+# entity-resolution similarity: measured sentence-to-name cosine on the demo
+# graph peaks around 0.72, so the shared 0.85 constant would never fire.
+QUERY_SEED_SIMILARITY = 0.60
+
+
+def _embedder_unavailable_notice() -> str:
+    return "Ollama embedder unavailable; degraded to exact-name seed matching."
 
 
 @dataclass(frozen=True)
@@ -35,7 +44,7 @@ class QueryGraph(Protocol):
 
 
 class QueryEmbedder(Protocol):
-    def embed(self, text: str) -> Sequence[float]: ...
+    def embed(self, text: str) -> Sequence[float] | None: ...
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -44,28 +53,37 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-def match_seeds(query: str, graph: QueryGraph, embedder: QueryEmbedder | None = None) -> list[Seed]:
-    """Match exact names/aliases first, then semantic entities above the contract threshold."""
+def match_seeds(query: str, graph: QueryGraph, embedder: QueryEmbedder | None = None, *,
+                threshold: float = QUERY_SEED_SIMILARITY,
+                notices: list[str] | None = None) -> list[Seed]:
+    """Match exact names/aliases first (score 1.0), then semantic entities above
+    the query-seeding threshold, which is independent of the entity-resolution
+    threshold. When the embedder is missing or fails, degrade to exact-name
+    matching and record the degradation in *notices* when provided."""
     normalized = normalize_name(query)
     entities = list(graph.entities())
     exact = [e for e in entities if normalize_name(e.name) == normalized or
              any(normalize_name(alias) == normalized for alias in e.aliases)]
     if exact:
         return [Seed(e, 1.0) for e in sorted(exact, key=lambda x: x.id)]
-    if embedder is None:
+    vector = embedder.embed(query) if embedder is not None else None
+    if vector is None:
+        if notices is not None:
+            notices.append(_embedder_unavailable_notice())
         return []
-    vector = embedder.embed(query)
     matches = [Seed(e, _cosine(vector, e.embedding)) for e in entities if e.embedding is not None]
-    return sorted((m for m in matches if m.score >= EMBEDDING_SIMILARITY),
+    return sorted((m for m in matches if m.score >= threshold),
                   key=lambda m: (-m.score, m.entity.id))
 
 
 def query_directions(query: str, graph: QueryGraph, *, top_k: int = 5,
                      max_edges_per_seed: int = 20,
-                     embedder: QueryEmbedder | None = None) -> tuple[list[Seed], list[Direction]]:
+                     embedder: QueryEmbedder | None = None,
+                     threshold: float = QUERY_SEED_SIMILARITY,
+                     notices: list[str] | None = None) -> tuple[list[Seed], list[Direction]]:
     if top_k <= 0 or max_edges_per_seed <= 0:
         raise ValueError("top_k and max_edges_per_seed must be positive")
-    seeds = match_seeds(query, graph, embedder)
+    seeds = match_seeds(query, graph, embedder, threshold=threshold, notices=notices)
     candidates: dict[tuple[str, str, str], Direction] = {}
     for seed in seeds:
         for edge in list(graph.edges_for(seed.entity))[:max_edges_per_seed]:

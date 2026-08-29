@@ -88,7 +88,15 @@ class _Neo4jQueryGraph:
 def query_command(settings: Settings, text: str, top_k: int, max_edges: int, output_format: str) -> int:
     graph = _Neo4jQueryGraph(settings)
     try:
-        seeds, directions = query_directions(text, graph, top_k=top_k, max_edges_per_seed=max_edges)
+        notices: list[str] = []
+        seeds, directions = query_directions(text, graph, top_k=top_k,
+                                             max_edges_per_seed=max_edges,
+                                             embedder=_build_embedder(settings),
+                                             threshold=settings.query_seed_similarity,
+                                             notices=notices)
+        for notice in notices:
+            # stderr keeps the JSON output shape (query/seeds/directions) unchanged.
+            print(f"Notice: {notice}", file=sys.stderr)
         if output_format == "json":
             print(json.dumps({"query": text,
                               "seeds": [{"name": s.entity.name, "score": s.score} for s in seeds],
