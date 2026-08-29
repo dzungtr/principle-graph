@@ -3,3 +3,4 @@ demo
 .worktrees
 .pi-subagents
 __pycache__
+*.egg-info/
