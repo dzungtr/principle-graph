@@ -276,6 +276,82 @@ def test_ingest_command_passes_input_fn_through_to_orchestrator(monkeypatch, tmp
 
 
 # ---------------------------------------------------------------------------
+# Mode-2 review interaction: interactive default, --yes opt-in.
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_command_defaults_to_interactive_review(monkeypatch, tmp_path: Path):
+    """With no --yes and no explicit input_fn, the terminal review loop is wired."""
+    import builtins
+
+    settings = _settings(uri="bolt://127.0.0.1:1")
+    source = tmp_path / "demo.md"
+    source.write_text("# Demo", encoding="utf-8")
+    monkeypatch.setattr("principle_graph.cli.preflight", lambda _s: None)
+    orchestrator = _FakeOrchestrator("approved")
+    monkeypatch.setattr(
+        "principle_graph.cli.build_orchestrator",
+        lambda _s: (orchestrator, _FakeWriter()),
+    )
+    out = io.StringIO()
+    with redirect_stdout(out):
+        ingest_command(settings, str(source), out=out)
+    assert orchestrator.received_input_fn is not None
+    # Behavioural check: the wired input reads the terminal, not a scripted feed.
+    monkeypatch.setattr(builtins, "input", lambda _prompt: "a")
+    assert orchestrator.received_input_fn("prompt") == "a"
+
+
+def test_ingest_command_yes_opts_into_scripted_approval(monkeypatch, tmp_path: Path):
+    settings = _settings(uri="bolt://127.0.0.1:1")
+    source = tmp_path / "demo.md"
+    source.write_text("# Demo", encoding="utf-8")
+    monkeypatch.setattr("principle_graph.cli.preflight", lambda _s: None)
+    orchestrator = _FakeOrchestrator("approved")
+    monkeypatch.setattr(
+        "principle_graph.cli.build_orchestrator",
+        lambda _s: (orchestrator, _FakeWriter()),
+    )
+    out = io.StringIO()
+    with redirect_stdout(out):
+        ingest_command(settings, str(source), yes=True, out=out)
+    assert orchestrator.received_input_fn is not None
+    assert orchestrator.received_input_fn("prompt") == "approve"
+
+
+def test_interactive_input_eof_suggests_yes(monkeypatch):
+    """Piped stdin without --yes must fail with the opt-in hint, never auto-approve."""
+    import builtins
+
+    from principle_graph.cli import _interactive_input
+
+    def _eof(_prompt: str) -> str:
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", _eof)
+    with pytest.raises(RuntimeError) as exc_info:
+        _interactive_input("prompt")
+    assert "--yes" in str(exc_info.value)
+
+
+def test_main_ingest_wires_yes_flag(monkeypatch, tmp_path: Path):
+    captured: dict[str, object] = {}
+
+    def _fake_ingest(settings, path, *, yes=False, input_fn=None, out=None):
+        captured["yes"] = yes
+        captured["path"] = path
+        return 0
+
+    monkeypatch.setattr("principle_graph.cli.ingest_command", _fake_ingest)
+    source = tmp_path / "demo.md"
+    source.write_text("# Demo", encoding="utf-8")
+    assert main(["ingest", str(source)]) == 0
+    assert captured == {"yes": False, "path": str(source)}
+    assert main(["ingest", str(source), "--yes"]) == 0
+    assert captured == {"yes": True, "path": str(source)}
+
+
+# ---------------------------------------------------------------------------
 # Build orchestrator seam shape.
 # ---------------------------------------------------------------------------
 

@@ -63,3 +63,23 @@ def test_rejected_verdict_is_audited_without_commit():
     assert graph.edges == {}
     assert graph.entities == []
     assert graph.rejected[0]["source_ref"] == "chapter 1"
+
+
+def test_rejection_record_retains_full_provenance():
+    """Rejected records carry candidate, evidence, scope, source, reason, decision
+    per the confidence policy's rejected-delta contract (docs/confidence-policy.md)."""
+    edge = GraphEdge("Alice", "USES", "Python", 0.8, "chapter 1",
+                     ("Alice uses Python daily",), "only for scripting")
+    proposed = GraphDelta(new_edges=[edge])
+    graph = InMemoryGraph()
+    result = review_and_commit(proposed, graph, input_fn=lambda _: "r")
+    record = graph.rejected[0]
+    assert record["candidate"] == edge
+    assert record["subject"] == "Alice"
+    assert record["relation"] == "USES"
+    assert record["object"] == "Python"
+    assert record["source_ref"] == "chapter 1"
+    assert record["evidence"] == ("Alice uses Python daily",)
+    assert record["scope_conditions"] == "only for scripting"
+    assert record["decision"] == "rejected"
+    assert record["reason"] == "rejected by reviewer"

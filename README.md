@@ -79,6 +79,28 @@ pg ingest path/to/source.md
 pg ingest path/to/source.pdf
 ```
 
+### Mode-2 review interaction
+
+By default the final Graph delta review is **interactive**: the delta is printed
+and the terminal prompts `approve, reject, or edit confidence`:
+
+- **approve** (`a`) — commit the delta and print the end-of-run stats (exit 0)
+- **reject** (`r`) — commit nothing; Rejected records with full provenance
+  (candidate edge, source ref, evidence, scope conditions, reason, decision)
+  are appended to `PG_REJECTED_LOG_PATH` and the command exits **4**
+- **edit** (`e`) — set a new confidence (0.0–1.0) on the first edge and
+  re-render the delta before deciding
+
+For smoke runs and agents, pass `--yes` to skip the prompt and approve the
+delta scripted:
+
+```sh
+pg ingest path/to/source.md --yes
+```
+
+If stdin closes before a decision (e.g. piped input without `--yes`), the run
+fails with a reminder to use `--yes` rather than silently approving.
+
 ### Environment
 
 `pg ingest` reads the same `.env` settings as the rest of the CLI. The relevant
