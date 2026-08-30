@@ -2,6 +2,8 @@
 
 Status: accepted for the prototype (2026-08-03)
 
+> Superseded in part by [ADR-0002](adr/0002-ledger-two-layer-schema.md) (ledger schema): evidence and provenance now live on `:ExtractionEvent` ledger rows rather than edge property lists; the complement formula is unchanged but computed over rows; repeat behavior gains explicit keep-first/refresh modes. The Mode-2 rejected-deltas section is unchanged.
+
 ## Repeat-edge identity
 
 A repeated extraction for the same `(subject Entity, relation, object Entity)` updates a
