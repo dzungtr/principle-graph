@@ -321,6 +321,25 @@ def ingest_command(
     return 0 if result.stats.verdict == "approved" else 4
 
 
+def migrate_ledger_command(settings: Settings, out=sys.stdout) -> int:
+    """Run the idempotent ledger backfill and print its report."""
+    try:
+        driver = _driver(settings)
+        try:
+            report = Neo4jGraphWriter(driver, database=settings.database).migrate_ledger()
+        finally:
+            driver.close()
+    except Exception as error:  # CLI should provide a useful failure without a traceback.
+        print(f"Ledger migration failed: {error}", file=sys.stderr)
+        return 1
+    print(
+        "Ledger migration complete: "
+        + ", ".join(f"{key}={value}" for key, value in report.items()),
+        file=out,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Principle Graph local knowledge-graph tools")
     subparsers = parser.add_subparsers(dest="command")
@@ -340,6 +359,23 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("--yes", action="store_true",
                         help="approve the Mode-2 delta without prompting (smoke runs and agents)")
     ingest.set_defaults(handler=lambda: ingest_command(Settings.from_env(), args.path, yes=args.yes))
+    migrate = subparsers.add_parser(
+        "migrate-ledger",
+        help="backfill one :ExtractionEvent ledger row per existing typed edge (ADR-0002)",
+        description=(
+            "Backfill the extraction ledger in place (ADR-0002, PRD #57): every "
+            "existing typed edge becomes exactly one :ExtractionEvent row seeded "
+            "from that edge's confidence, evidence (first item — the row shape "
+            "carries a single evidence string), and source ref; single-row "
+            "aggregates equal the prior confidence, so arrow values do not move. "
+            "Idempotent: re-running matches previously created rows by "
+            "(subject, relation, object, source_ref) identity and changes no "
+            "state — timestamps included — so the command is safe to repeat. "
+            "Legacy evidence/source_ref properties are removed from migrated "
+            "arrows; apply 'pg init' first so the ledger index exists."
+        ),
+    )
+    migrate.set_defaults(handler=lambda: migrate_ledger_command(Settings.from_env()))
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()

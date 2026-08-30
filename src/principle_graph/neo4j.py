@@ -166,6 +166,144 @@ class Neo4jGraphWriter:
                     scope_conditions=update.scope_conditions,
                 )
 
+    # --- backfill migration (issue #60) -----------------------------------
+    _BACKFILL_LOAD_QUERY = (
+        "MATCH (s:Entity)-[r]->(o:Entity) "
+        "WHERE type(r) <> 'REPORTED' "
+        "AND NOT EXISTS { (s)-[:REPORTED]->(:ExtractionEvent)-[:ABOUT]->(o) } "
+        "RETURN s.name AS subject, type(r) AS relation, o.name AS object, "
+        "r.confidence AS confidence, r.evidence AS evidence, "
+        "r.scope_conditions AS scope_conditions, r.source_ref AS source_ref"
+    )
+    _BACKFILL_ROWS_LOAD_QUERY = (
+        "MATCH (s:Entity)-[:REPORTED]->(e:ExtractionEvent)-[:ABOUT]->(o:Entity) "
+        "RETURN s.name AS subject, e.relation AS relation, o.name AS object, "
+        "e.source_ref AS source_ref, e.confidence AS confidence, "
+        "e.evidence AS evidence, e.scope_conditions AS scope_conditions "
+        "ORDER BY e.created_at"
+    )
+    # No ON MATCH clause: a re-run must not touch already-migrated rows, so a
+    # second migration changes no state at all (issue #60 idempotency AC).
+    _BACKFILL_ROW_MERGE_QUERY = (
+        "MATCH (s:Entity {name: $subject}), (o:Entity {name: $object}) "
+        "MERGE (s)-[:REPORTED]->"
+        "(e:ExtractionEvent {relation: $relation, source_ref: $source_ref})-[:ABOUT]->(o) "
+        "ON CREATE SET e.confidence = $confidence, e.evidence = $evidence, "
+        "e.scope_conditions = $scope_conditions, e.domain = $domain, "
+        "e.created_at = datetime(), e.updated_at = datetime()"
+    )
+    _BACKFILL_ARROW_CONFIDENCE_QUERY = (
+        "MATCH (s:Entity {{name: $subject}})-[r:{relation}]->(o:Entity {{name: $object}}) "
+        "RETURN r.confidence AS confidence"
+    )
+    _BACKFILL_ARROW_SET_QUERY = (
+        "MATCH (s:Entity {{name: $subject}}), (o:Entity {{name: $object}}) "
+        "MERGE (s)-[r:{relation}]->(o) "
+        "ON CREATE SET r.created_at = datetime() "
+        "SET r.confidence = $aggregate_confidence, r.updated_at = datetime()"
+    )
+    _BACKFILL_STRIP_CLAUSE = (
+        "WHERE type(r) <> 'REPORTED' "
+        "AND EXISTS { (s)-[:REPORTED]->(:ExtractionEvent)-[:ABOUT]->(o) } "
+        "AND (r.evidence IS NOT NULL OR r.source_ref IS NOT NULL)"
+    )
+    _BACKFILL_STRIP_COUNT_QUERY = (
+        "MATCH (s:Entity)-[r]->(o:Entity) " + _BACKFILL_STRIP_CLAUSE
+        + " RETURN count(r) AS count"
+    )
+    _BACKFILL_STRIP_QUERY = (
+        "MATCH (s:Entity)-[r]->(o:Entity) " + _BACKFILL_STRIP_CLAUSE
+        + " REMOVE r.evidence, r.source_ref"
+    )
+    # A single-row complement aggregate round-trips the prior confidence to
+    # within one float ulp; the epsilon guard turns that round-trip into an
+    # exact no-op so migration never moves an arrow's stored value.
+    _AGGREGATE_EPSILON = 1e-12
+
+    def migrate_ledger(self) -> dict[str, int]:
+        """Backfill one ledger row per existing typed edge (ADR-0002, PRD #57).
+
+        Idempotent by ledger identity: only arrows without ledger rows are
+        candidates (migrated arrows are never re-derived — the strip removes
+        their provenance properties), rows merge with no ON MATCH side
+        effects, arrow writes fire only when the recomputed aggregate actually
+        differs beyond float epsilon, and legacy provenance stripping only
+        fires while such properties remain. A second run changes no state —
+        timestamps included — and arrow confidences never move: a single-row
+        complement aggregate equals the prior edge confidence.
+        """
+        with self.driver.session(database=self.database) as session:
+            candidates: list[LedgerRow] = []
+            for record in session.run(self._BACKFILL_LOAD_QUERY):
+                confidence = record["confidence"]
+                if confidence is None:
+                    raise ValueError(
+                        f"edge {record['subject']}-[{record['relation']}]->"
+                        f"{record['object']} has no confidence; migration "
+                        "requires confident edges"
+                    )
+                evidence = record["evidence"] or []
+                candidates.append(LedgerRow(
+                    record["subject"], _relation(record["relation"]),
+                    record["object"], record["source_ref"] or "",
+                    float(confidence),
+                    evidence[0] if evidence else "",  # row shape: one evidence string
+                    record["scope_conditions"] or "",
+                ))
+            existing = [
+                LedgerRow(
+                    record["subject"], _relation(record["relation"]),
+                    record["object"], record["source_ref"] or "",
+                    float(record["confidence"] or 0.0),
+                    record["evidence"] or "", record["scope_conditions"] or "",
+                )
+                for record in session.run(self._BACKFILL_ROWS_LOAD_QUERY)
+            ]
+            plan = plan_ledger_writes(existing, candidates)
+            for row in plan.rows_to_create:
+                session.run(
+                    self._BACKFILL_ROW_MERGE_QUERY,
+                    subject=row.subject,
+                    object=row.object,
+                    relation=row.relation,
+                    source_ref=row.source_ref,
+                    confidence=row.confidence,
+                    evidence=row.evidence,
+                    scope_conditions=row.scope_conditions,
+                    domain=row.domain,
+                ).consume()
+            arrows_recomputed = 0
+            for update in plan.arrow_updates:
+                record = session.run(
+                    self._BACKFILL_ARROW_CONFIDENCE_QUERY.format(relation=update.relation),
+                    subject=update.subject,
+                    object=update.object,
+                ).single()
+                current = record["confidence"] if record is not None else None
+                if (current is not None
+                        and abs(float(current) - update.aggregate_confidence)
+                        <= self._AGGREGATE_EPSILON):
+                    continue
+                session.run(
+                    self._BACKFILL_ARROW_SET_QUERY.format(relation=update.relation),
+                    subject=update.subject,
+                    object=update.object,
+                    aggregate_confidence=update.aggregate_confidence,
+                ).consume()
+                arrows_recomputed += 1
+            stripped_record = session.run(self._BACKFILL_STRIP_COUNT_QUERY).single()
+            stripped = stripped_record["count"] if stripped_record is not None else 0
+            if stripped:
+                session.run(self._BACKFILL_STRIP_QUERY).consume()
+            return {
+                "edges_seen": len(candidates),
+                "rows_created": len(plan.rows_to_create),
+                "rows_skipped": len(plan.skipped_identities),
+                "arrows_recomputed": arrows_recomputed,
+                "arrows_unchanged": len(plan.arrow_updates) - arrows_recomputed,
+                "legacy_props_stripped": stripped,
+            }
+
     def get_edge(self, subject: str, relation: str, object_: str) -> GraphEdge | None:
         relation = _relation(relation)
         query = (
