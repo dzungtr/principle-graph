@@ -24,4 +24,11 @@ Decision: split current state from history into two layers. The typed relationsh
 
 ## Measured results
 
-_To be promoted from PRD #57 Results at initiative close (migration scale, aggregate shifts, equality-test evidence)._
+Promoted from PRD #57 Results (initiative closed 2026-08-30; slices merged as PRs #67, #68, #69, #71):
+
+- **Migration scale:** demo graph 92 entities / 56 arrows → 56 ledger rows in a single `pg migrate-ledger` pass; second run a full no-op (idempotent). Zero arrow confidences moved — `agg == row` held on 56/56 rows, as predicted by the single-row-seeding design.
+- **Fan-out contract equality:** 3/3 baseline queries, 10/10 directions identical per rank across all 8 contract fields (relation, neighbor, confidence, scope_conditions, source_ref, evidence, rank, seed) — captured pre-migration, re-verified live at the PR #71 review against the post-migration demo graph.
+- **Suite growth over the initiative:** 103 → 181 tests, all database-free; ledger policy core isolated in a pure module (`src/principle_graph/ledger.py`), write path pinned by recording-fake and stateful plan-driven fakes.
+- **Seed-score wobble learning:** seed scores wobble ≤2e-4 across embedder runs on the same graph. Future pre/post baselines should compare seed names + order and per-rank directions, not raw seed scores.
+
+These numbers are the migration evidence for the two-layer decision: history became representable without moving current state, and the read-path contract survived the split unchanged. Known deferred hardening is filed as follow-ups #70 (per-relation migration guard) and #72 (multi-item legacy evidence seeding).
