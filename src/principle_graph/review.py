@@ -35,6 +35,9 @@ class GraphDelta:
     confidence_changes: list[tuple[str, str, str, float, float]] = field(default_factory=list)
     # Full merged edges for confidence changes, including provenance.
     updated_edges: list[GraphEdge] = field(default_factory=list)
+    # Per-source candidates, pre-reduction. Ledger writers commit these as one
+    # :ExtractionEvent row each; merged edges above remain the review rendering.
+    raw_candidates: list[GraphEdge] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

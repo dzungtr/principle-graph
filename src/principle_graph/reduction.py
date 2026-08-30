@@ -69,7 +69,7 @@ def assemble_delta(candidates: Sequence[GraphEdge], existing: Sequence[GraphEdge
                 changes.append((edge.subject, edge.relation, edge.object, old.confidence, merged.confidence))
                 updated_edges.append(merged)
     return GraphDelta(new_entities=list(entities), new_edges=new_edges, confidence_changes=changes,
-                      updated_edges=updated_edges)
+                      updated_edges=updated_edges, raw_candidates=list(candidates))
 
 
 class GraphWriter(Protocol):
@@ -81,6 +81,16 @@ class GraphWriter(Protocol):
 
 def commit_delta(delta: GraphDelta, writer: GraphWriter) -> None:
     """Commit only an approved delta. Rejected review records are never passed here."""
+    upsert_extraction = getattr(writer, "upsert_extraction", None)
+    if upsert_extraction is not None and delta.raw_candidates:
+        # Ledger path (ADR-0002): each accepted per-source candidate becomes its
+        # own :ExtractionEvent row and the writer recomputes the arrow aggregate;
+        # merged edges above are the review rendering, not the write unit.
+        for entity in delta.new_entities:
+            writer.upsert_entity(entity)
+        for edge in delta.raw_candidates:
+            upsert_extraction(edge)
+        return
     for entity in delta.new_entities:
         writer.upsert_entity(entity)
     for edge in delta.new_edges:

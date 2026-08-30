@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .ledger import LedgerRow, plan_ledger_writes
 from .reduction import GraphEdge, GraphEntity
 from .resolution import Entity, SimilarEntity
 
@@ -91,16 +92,95 @@ class Neo4jGraphWriter:
                 source_ref=edge.source_ref,
             )
 
+    _ROW_LOAD_QUERY = (
+        "MATCH (s:Entity {name: $subject})-[:REPORTED]->"
+        "(e:ExtractionEvent {relation: $relation})-[:ABOUT]->(o:Entity {name: $object}) "
+        "RETURN e.source_ref AS source_ref, e.confidence AS confidence, "
+        "e.evidence AS evidence, e.scope_conditions AS scope_conditions "
+        "ORDER BY e.created_at"
+    )
+    # Identity-bearing write shape (ADR-0002, Lesson 0003 Task B): the pattern
+    # MERGE enforces (triple, source_ref) identity where Community 5.x cannot.
+    _ROW_MERGE_QUERY = (
+        "MATCH (s:Entity {name: $subject}), (o:Entity {name: $object}) "
+        "MERGE (s)-[:REPORTED]->"
+        "(e:ExtractionEvent {relation: $relation, source_ref: $source_ref})-[:ABOUT]->(o) "
+        "ON CREATE SET e.confidence = $confidence, e.evidence = $evidence, "
+        "e.scope_conditions = $scope_conditions, e.domain = $domain, "
+        "e.created_at = datetime(), e.updated_at = datetime() "
+        "ON MATCH SET e.updated_at = datetime()"
+    )
+
+    def upsert_extraction(self, edge: GraphEdge) -> None:
+        """Append one accepted extraction as a ledger row and recompute the arrow.
+
+        The keep-first plan comes from the pure ledger module; this adapter only
+        executes it. The arrow's derived aggregate is recomputed from all rows
+        for the triple on every call — never set independently.
+        """
+        relation = _relation(edge.relation)
+        candidate = LedgerRow(
+            edge.subject, relation, edge.object, edge.source_ref, edge.confidence,
+            edge.evidence[0] if edge.evidence else "", edge.scope_conditions,
+        )
+        with self.driver.session(database=self.database) as session:
+            existing = [
+                LedgerRow(candidate.subject, relation, candidate.object,
+                          record["source_ref"] or "", record["confidence"] or 0.0,
+                          record["evidence"] or "", record["scope_conditions"] or "")
+                for record in session.run(
+                    self._ROW_LOAD_QUERY,
+                    subject=candidate.subject,
+                    object=candidate.object,
+                    relation=relation,
+                )
+            ]
+            plan = plan_ledger_writes(existing, [candidate])
+            for row in plan.rows_to_create:
+                session.run(
+                    self._ROW_MERGE_QUERY,
+                    subject=row.subject,
+                    object=row.object,
+                    relation=row.relation,
+                    source_ref=row.source_ref,
+                    confidence=row.confidence,
+                    evidence=row.evidence,
+                    scope_conditions=row.scope_conditions,
+                    domain=row.domain,
+                )
+            for update in plan.arrow_updates:
+                query = (
+                    f"MATCH (s:Entity {{name: $subject}}), (o:Entity {{name: $object}}) "
+                    f"MERGE (s)-[r:{update.relation}]->(o) "
+                    "ON CREATE SET r.created_at = datetime() "
+                    "SET r.confidence = $aggregate_confidence, "
+                    "r.scope_conditions = CASE WHEN $scope_conditions = '' "
+                    "THEN r.scope_conditions ELSE $scope_conditions END, "
+                    "r.updated_at = datetime()"
+                )
+                session.run(
+                    query,
+                    subject=update.subject,
+                    object=update.object,
+                    aggregate_confidence=update.aggregate_confidence,
+                    scope_conditions=update.scope_conditions,
+                )
+
     def get_edge(self, subject: str, relation: str, object_: str) -> GraphEdge | None:
         relation = _relation(relation)
         query = (
             f"MATCH (s:Entity {{name: $subject}})-[r:{relation}]->(o:Entity {{name: $object}}) "
+            "OPTIONAL MATCH (s)-[:REPORTED]->(e:ExtractionEvent {relation: $relation})-[:ABOUT]->(o) "
+            "WITH s, r, o, e ORDER BY e.created_at "
             "RETURN s.name AS subject, type(r) AS relation, o.name AS object, "
-            "r.confidence AS confidence, r.source_ref AS source_ref, r.evidence AS evidence, "
-            "r.scope_conditions AS scope_conditions"
+            "r.confidence AS confidence, r.scope_conditions AS scope_conditions, "
+            "r.source_ref AS legacy_source_ref, r.evidence AS legacy_evidence, "
+            "collect(e.source_ref) AS row_refs, collect(e.evidence) AS row_evidence"
         )
         with self.driver.session(database=self.database) as session:
-            record = session.run(query, subject=subject, object=object_).single()
+            record = session.run(
+                query, subject=subject, object=object_, relation=relation
+            ).single()
         if record is None:
             return None
         get = (
@@ -108,13 +188,17 @@ class Neo4jGraphWriter:
             if hasattr(record, "get")
             else (lambda key, default=None: record[key] if key in record else default)
         )
+        row_refs = [ref for ref in (get("row_refs") or []) if ref]
+        row_evidence = [item for item in (get("row_evidence") or []) if item]
+        source_ref = row_refs[-1] if row_refs else (get("legacy_source_ref") or "")
+        evidence = tuple(row_evidence) or tuple(get("legacy_evidence") or [])
         return GraphEdge(
             get("subject"),
             get("relation"),
             get("object"),
             get("confidence"),
-            get("source_ref", ""),
-            tuple(get("evidence", []) or []),
+            source_ref,
+            evidence,
             get("scope_conditions", "") or "",
         )
 

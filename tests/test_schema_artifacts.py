@@ -25,16 +25,34 @@ class SchemaArtifactTests(unittest.TestCase):
         self.assertIn("`vector.dimensions`: 1024", DDL)
         self.assertIn("`vector.similarity_function`: 'cosine'", DDL)
 
-    def test_spec_covers_edge_properties(self):
+    def test_ddl_defines_extraction_event_source_ref_index(self):
+        self.assertRegex(
+            DDL,
+            re.compile(
+                r"CREATE RANGE INDEX extraction_event_source_ref IF NOT EXISTS\s+"
+                r"FOR \(event:ExtractionEvent\)\s+ON \(event\.source_ref\)",
+                re.DOTALL,
+            ),
+        )
+
+    def test_spec_defines_the_two_layer_model(self):
+        self.assertIn("### `ExtractionEvent`", SPEC)
+        self.assertIn("REPORTED", SPEC)
+        self.assertIn("ABOUT", SPEC)
         for property_name in (
+            "relation",
+            "source_ref",
             "confidence",
             "evidence",
             "scope_conditions",
-            "source_ref",
+            "domain",
             "created_at",
             "updated_at",
         ):
             self.assertIn(f"`{property_name}`", SPEC)
+
+    def test_spec_moves_evidence_off_the_arrow(self):
+        self.assertNotIn("`evidence` | list<string> | yes", SPEC)
 
 
 if __name__ == "__main__":
