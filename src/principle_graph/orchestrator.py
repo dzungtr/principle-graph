@@ -4,9 +4,9 @@ The orchestrator composes the existing seams:
 
   source → chunk → sequential extract → resolve → delta → review → commit → stats
 
-Scratch state is in-memory and disposable; a crash means rerun. Same-source reruns do
-not double-boost confidence because the reduction stage treats same-`source_ref` events as
-non-independent (per the confidence policy).
+Scratch state is in-memory and disposable; a crash means rerun. Repeat extractions are
+no-ops under the ledger: same-source reruns match an existing ``:ExtractionEvent`` row by
+identity and keep-first leaves it untouched (ADR-0002), so aggregates cannot wobble.
 """
 from __future__ import annotations
 

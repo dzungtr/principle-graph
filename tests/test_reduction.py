@@ -71,3 +71,48 @@ def test_same_source_scope_change_emits_and_commits_delta():
 
 def test_aggregation_is_clamped():
     assert aggregate_confidence(2, 2) == 1
+
+
+def test_assemble_delta_carries_raw_per_source_candidates():
+    delta = assemble_delta([
+        GraphEdge("a", "r", "b", .6, "s1", ("first",)),
+        GraphEdge("a", "r", "b", .5, "s2", ("second",)),
+    ])
+    assert len(delta.new_edges) == 1
+    assert [(edge.source_ref, edge.evidence) for edge in delta.raw_candidates] == [
+        ("s1", ("first",)), ("s2", ("second",)),
+    ]
+
+
+class _LedgerRecordingGraph(InMemoryGraph):
+    """InMemoryGraph with a ledger seam; legacy upserts must never fire."""
+
+    def __init__(self):
+        super().__init__()
+        self.extraction_writes = []
+
+    def upsert_extraction(self, edge):
+        self.extraction_writes.append(edge)
+
+
+def test_commit_delta_routes_raw_candidates_to_ledger_writer():
+    graph = _LedgerRecordingGraph()
+    delta = assemble_delta(
+        [GraphEdge("a", "r", "b", .6, "s1", ("first",)),
+         GraphEdge("a", "r", "b", .5, "s2", ("second",))],
+        entities=[GraphEntity("a", "thing"), GraphEntity("b", "thing")],
+    )
+    commit_delta(delta, graph)
+    assert [edge.source_ref for edge in graph.extraction_writes] == ["s1", "s2"]
+    assert graph.edges == {}
+    assert len(graph.entities) == 2
+
+
+def test_commit_delta_ledger_path_treats_confidence_changes_as_rows():
+    graph = _LedgerRecordingGraph()
+    existing = [GraphEdge("a", "R", "b", .5, "s1", ("old",))]
+    delta = assemble_delta([GraphEdge("a", "r", "b", .5, "s2", ("new",))], existing=existing)
+    assert delta.confidence_changes  # legacy rendering still shows the change
+    commit_delta(delta, graph)
+    assert [edge.source_ref for edge in graph.extraction_writes] == ["s2"]
+    assert graph.edges == {}

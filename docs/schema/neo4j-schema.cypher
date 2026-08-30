@@ -18,3 +18,12 @@ OPTIONS {
     `vector.similarity_function`: 'cosine'
   }
 };
+
+// Ledger rows (ADR-0002): append-only per-extraction facts. One :ExtractionEvent per
+// accepted extraction, identified by (subject, relation, object, source_ref). Neo4j
+// Community 5.x cannot express composite uniqueness across relationship endpoints, so
+// row identity is enforced by the write layer's pattern MERGE. This index supports
+// provenance lookups by source reference.
+CREATE RANGE INDEX extraction_event_source_ref IF NOT EXISTS
+FOR (event:ExtractionEvent)
+ON (event.source_ref);

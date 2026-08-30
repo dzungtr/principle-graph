@@ -108,20 +108,46 @@ def test_graph_writer_get_edge_returns_none_when_missing():
     assert "MATCH (s:Entity {name: $subject})-[r:SUPPORTS]->(o:Entity {name: $object})" in query
 
 
-def test_graph_writer_get_edge_returns_graph_edge_with_evidence():
+def test_graph_writer_get_edge_sources_provenance_from_rows():
     row = {
         "subject": "a",
         "relation": "SUPPORTS",
         "object": "b",
-        "confidence": 0.6,
-        "source_ref": "s1",
-        "evidence": ["ev1", "ev2"],
+        "confidence": 0.8,
         "scope_conditions": "scope",
+        "legacy_source_ref": None,
+        "legacy_evidence": None,
+        "row_refs": ["s1", "s2"],
+        "row_evidence": ["ev1", "ev2"],
     }
     driver = RecordingDriver(rows=[row])
     writer = Neo4jGraphWriter(driver)
     edge = writer.get_edge("a", "supports", "b")
-    assert edge == GraphEdge("a", "SUPPORTS", "b", 0.6, "s1", ("ev1", "ev2"), "scope")
+    assert edge == GraphEdge("a", "SUPPORTS", "b", 0.8, "s2", ("ev1", "ev2"), "scope")
+    (session,) = driver.sessions
+    [(query, params)] = session.queries
+    assert ("OPTIONAL MATCH (s)-[:REPORTED]->"
+            "(e:ExtractionEvent {relation: $relation})-[:ABOUT]->(o)") in query
+    assert params["relation"] == "SUPPORTS"
+
+
+def test_graph_writer_get_edge_falls_back_to_unmigrated_arrow_properties():
+    """Arrows not yet backfilled (#60) still answer through their legacy properties."""
+    row = {
+        "subject": "a",
+        "relation": "SUPPORTS",
+        "object": "b",
+        "confidence": 0.5,
+        "scope_conditions": "scope",
+        "legacy_source_ref": "s0",
+        "legacy_evidence": ["old"],
+        "row_refs": [],
+        "row_evidence": [],
+    }
+    driver = RecordingDriver(rows=[row])
+    writer = Neo4jGraphWriter(driver)
+    assert writer.get_edge("a", "supports", "b") == GraphEdge(
+        "a", "SUPPORTS", "b", 0.5, "s0", ("old",), "scope")
 
 
 def test_rejected_sink_writes_jsonl_and_creates_parent(tmp_path: Path):
@@ -219,6 +245,68 @@ def test_structural_corroboration_rejects_non_uppercase_relation():
     store = Neo4jEntityStore(driver)
     with pytest.raises(ValueError, match="uppercase"):
         store.structural_corroboration(Entity("e1", "x", "y"), [("a", "not-valid")])
+
+
+def test_upsert_extraction_loads_existing_rows_for_the_triple():
+    driver = RecordingDriver()
+    writer = Neo4jGraphWriter(driver)
+    writer.upsert_extraction(GraphEdge("a", "supports", "b", 0.5, "s1", ("witness",), ""))
+    (session,) = driver.sessions
+    load_query, load_params = session.queries[0]
+    assert ("MATCH (s:Entity {name: $subject})-[:REPORTED]->"
+            "(e:ExtractionEvent {relation: $relation})-[:ABOUT]->"
+            "(o:Entity {name: $object})") in load_query
+    assert load_params == {"subject": "a", "object": "b", "relation": "SUPPORTS"}
+
+
+def test_upsert_extraction_merges_row_on_identity_with_single_string_evidence():
+    driver = RecordingDriver()
+    writer = Neo4jGraphWriter(driver)
+    writer.upsert_extraction(GraphEdge("a", "supports", "b", 0.5, "doc:chunk-1",
+                                       ("witness",), "when armed"))
+    (session,) = driver.sessions
+    merge_query, params = session.queries[1]
+    assert ("MERGE (s)-[:REPORTED]->"
+            "(e:ExtractionEvent {relation: $relation, source_ref: $source_ref})-[:ABOUT]->(o)") in merge_query
+    assert "ON CREATE SET e.confidence = $confidence" in merge_query
+    assert "e.evidence = $evidence" in merge_query
+    assert "e.scope_conditions = $scope_conditions" in merge_query
+    assert "e.domain = $domain" in merge_query
+    # Keep-first: a matched row only touches its timestamp, never its values.
+    assert merge_query.count("ON MATCH") == 1
+    assert "ON MATCH SET e.updated_at = datetime()" in merge_query
+    assert params["source_ref"] == "doc:chunk-1"
+    assert params["evidence"] == "witness"
+    assert params["confidence"] == 0.5
+    assert params["scope_conditions"] == "when armed"
+    assert params["domain"] == ""
+
+
+def test_upsert_extraction_never_overwrites_a_matched_row():
+    existing = {"source_ref": "s1", "confidence": 0.6, "evidence": "first",
+                "scope_conditions": "old"}
+    driver = RecordingDriver(rows=[dict(existing)])
+    writer = Neo4jGraphWriter(driver)
+    writer.upsert_extraction(GraphEdge("a", "supports", "b", 0.9, "s1", ("second",), "new"))
+    (session,) = driver.sessions
+    queries = [query for query, _ in session.queries]
+    assert not any("MERGE (s)-[:REPORTED]" in query for query in queries)
+    recompute_query, recompute_params = session.queries[-1]
+    assert "SET r.confidence = $aggregate_confidence" in recompute_query
+    assert recompute_params["aggregate_confidence"] == 0.6
+
+
+def test_upsert_extraction_recomputes_arrow_from_all_rows():
+    driver = RecordingDriver(rows=[{"source_ref": "s1", "confidence": 0.6,
+                                    "evidence": "first", "scope_conditions": ""}])
+    writer = Neo4jGraphWriter(driver)
+    writer.upsert_extraction(GraphEdge("a", "supports", "b", 0.5, "s2", ("second",), ""))
+    (session,) = driver.sessions
+    recompute_query, recompute_params = session.queries[-1]
+    assert "MERGE (s)-[r:SUPPORTS]->(o)" in recompute_query
+    assert "SET r.confidence = $aggregate_confidence" in recompute_query
+    assert "r.scope_conditions = CASE WHEN $scope_conditions = ''" in recompute_query
+    assert recompute_params["aggregate_confidence"] == 0.8
 
 
 def test_load_existing_edges_only_fetches_named_triples():

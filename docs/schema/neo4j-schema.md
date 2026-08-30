@@ -19,31 +19,57 @@ runnable DDL is [`neo4j-schema.cypher`](neo4j-schema.cypher).
 pair may occur only once. Aliases are not persisted in this slice; resolution can map aliases
 to this identity later.
 
-## Relationships
+## Nodes
+
+### `ExtractionEvent`
+
+Ledger row (ADR-0002): one append-only extraction event per accepted extraction, wired
+`(:Entity)-[:REPORTED]->(:ExtractionEvent)-[:ABOUT]->(:Entity)`. Row identity is
+`(subject, relation, object, source_ref)`, enforced by the write layer's pattern MERGE —
+Neo4j Community 5.x cannot express composite uniqueness across relationship endpoints.
+Re-ingesting the same claim from the same source reference is therefore a structural
+no-op under the default keep-first mode.
+
+| Property | Type | Required | Meaning |
+|---|---|---:|---|
+| `relation` | string | yes | Domain relation this row reports (self-describing). |
+| `source_ref` | string | yes | Source/chunk or page reference; part of row identity. |
+| `confidence` | float | yes | This extraction event's own confidence in `[0.0, 1.0]`. |
+| `evidence` | string | yes | Single supporting snippet — lists exist nowhere anymore. |
+| `scope_conditions` | string | no | Qualifiers claimed by this extraction. |
+| `domain` | string | no | Optional domain tag for later per-domain belief. |
+| `created_at` | datetime | yes | First persistence time. |
+| `updated_at` | datetime | yes | Last touch time (keep-first never rewrites values). |
+
+## Relationships (Arrows)
 
 Every typed, directed relationship uses its domain relation as the Neo4j relationship type
 (for example, `:INCREASES`). Relationship types must be normalized to uppercase identifiers
 before Cypher is generated; values are not interpolated directly into queries.
 
+An Arrow carries current state only; history lives in the ledger above.
+
 | Property | Type | Required | Meaning |
 |---|---|---:|---|
-| `confidence` | float | yes | Current aggregate confidence in `[0.0, 1.0]`. |
-| `evidence` | list<string> | yes | Paraphrased supporting snippets, retaining all accepted evidence. |
-| `scope_conditions` | string | no | Qualifiers limiting the relationship. |
-| `source_ref` | string | yes | Source/chunk or page reference for the extraction. |
+| `confidence` | float | yes | Derived aggregate `1 − Π(1 − ci)` over the triple's ledger rows, clamped to `[0.0, 1.0]`. Never set independently. |
+| `scope_conditions` | string | no | Denormalized latest-merged qualifiers limiting the relationship. |
 | `created_at` | datetime | yes | First persistence time. |
-| `updated_at` | datetime | yes | Last mutation time. |
+| `updated_at` | datetime | yes | Last recompute time. |
 
 A relationship is identified for prototype purposes by `(start Entity, relationship type,
-end Entity)`. Confidence aggregation and repeat-extraction behavior are specified by issue
-#4; this schema deliberately does not impose that policy.
+end Entity)`. Confidence aggregation and repeat-extraction behavior follow
+[ADR-0002](../adr/0002-ledger-two-layer-schema.md) over `:ExtractionEvent` rows; provenance
+(evidence strings, source references) is read through one ledger hop. Arrows written before
+the ledger migration may still carry legacy `evidence`/`source_ref` properties until the
+backfill migration removes them.
 
 ## Constraints and indexes
 
 `docs/schema/neo4j-schema.cypher` applies:
 
 - a uniqueness constraint on `Entity(name, type)`;
-- a 1024-dimensional cosine vector index on `Entity.embedding`, matching the local `bge-m3` embedding model (ADR-0001).
+- a 1024-dimensional cosine vector index on `Entity.embedding`, matching the local `bge-m3` embedding model (ADR-0001);
+- a range index on `ExtractionEvent(source_ref)` for provenance lookups (ADR-0002).
 
 Neo4j property types are enforced by the application write layer (including confidence bounds,
 non-null required fields, and timestamp assignment). Neo4j does not support a property schema

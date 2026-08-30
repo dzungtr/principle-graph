@@ -65,6 +65,48 @@ def test_rejected_verdict_is_audited_without_commit():
     assert graph.rejected[0]["source_ref"] == "chapter 1"
 
 
+def test_edit_confidence_propagates_into_raw_candidates():
+    """Mode-2 [e] must reach the ledger write unit (raw_candidates), not only the
+    rendering — the ledger path commits raw_candidates per ADR-0002 (PRD #57)."""
+    other = GraphEdge("Bob", "cites", "Carol", 0.7, "doc:chunk-2", ("second",))
+    proposed = GraphDelta(
+        new_edges=[GraphEdge("Alice", "USES", "Python", 0.6, "doc:chunk-1", ("first",), "scope-a")],
+        raw_candidates=[
+            GraphEdge("Alice", "uses", "Python", 0.6, "doc:chunk-1", ("first",), "scope-a"),
+            other,
+        ],
+    )
+    answers = iter(["e", "0.95", "a"])
+    result = review_delta(proposed, input_fn=lambda _: next(answers))
+    assert result.approved.new_edges[0].confidence == 0.95
+    # Edited confidence lands on the matching candidate; its provenance and the
+    # unrelated candidate are untouched.
+    assert result.approved.raw_candidates == [
+        GraphEdge("Alice", "uses", "Python", 0.95, "doc:chunk-1", ("first",), "scope-a"),
+        other,
+    ]
+
+
+def test_edit_collapses_same_triple_candidates_into_one_row():
+    """The edited edge is the merged rendering of one triple's candidates; the
+    edit applies to that connection, keeping the first candidate's provenance."""
+    other = GraphEdge("Bob", "CITES", "Carol", 0.7, "doc:chunk-2", ("third",))
+    proposed = GraphDelta(
+        new_edges=[GraphEdge("Alice", "USES", "Python", 0.8, "doc:chunk-2", ("first", "second"))],
+        raw_candidates=[
+            GraphEdge("Alice", "USES", "Python", 0.6, "doc:chunk-1", ("first",)),
+            GraphEdge("Alice", "USES", "Python", 0.5, "doc:chunk-2", ("second",)),
+            other,
+        ],
+    )
+    answers = iter(["e", "0.95", "a"])
+    result = review_delta(proposed, input_fn=lambda _: next(answers))
+    assert result.approved.raw_candidates == [
+        GraphEdge("Alice", "USES", "Python", 0.95, "doc:chunk-1", ("first",)),
+        other,
+    ]
+
+
 def test_rejection_record_retains_full_provenance():
     """Rejected records carry candidate, evidence, scope, source, reason, decision
     per the confidence policy's rejected-delta contract (docs/confidence-policy.md)."""

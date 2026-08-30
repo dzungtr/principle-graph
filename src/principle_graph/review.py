@@ -35,6 +35,9 @@ class GraphDelta:
     confidence_changes: list[tuple[str, str, str, float, float]] = field(default_factory=list)
     # Full merged edges for confidence changes, including provenance.
     updated_edges: list[GraphEdge] = field(default_factory=list)
+    # Per-source candidates, pre-reduction. Ledger writers commit these as one
+    # :ExtractionEvent row each; merged edges above remain the review rendering.
+    raw_candidates: list[GraphEdge] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -86,10 +89,35 @@ def review_delta(delta: GraphDelta, input_fn: Callable[[str], str] = input) -> R
                 print("Confidence must be between 0.0 and 1.0.")
                 continue
             edited = replace(delta.new_edges[0], confidence=confidence)
-            delta = replace(delta, new_edges=[edited, *delta.new_edges[1:]])
+            delta = replace(
+                delta,
+                new_edges=[edited, *delta.new_edges[1:]],
+                raw_candidates=_propagate_edit_to_candidates(delta.raw_candidates, edited),
+            )
             print(render_delta(delta))
             continue
         print("Choose approve, reject, or edit.")
+
+
+def _propagate_edit_to_candidates(candidates: list[GraphEdge], edited: GraphEdge) -> list[GraphEdge]:
+    """Propagate a Mode-2 confidence edit into the per-source ledger write unit.
+
+    The edited edge is the merged rendering of every raw candidate sharing its
+    (subject, relation, object) triple; ledger writers commit raw_candidates, so
+    the edit collapses those candidates into one row at the edited confidence,
+    keeping the first candidate's provenance. Without this the edit would only
+    change the review rendering and silently drop from the committed ledger.
+    """
+    key = (edited.subject, edited.relation.upper(), edited.object)
+    propagated: list[GraphEdge] = []
+    replaced = False
+    for candidate in candidates:
+        if (candidate.subject, candidate.relation.upper(), candidate.object) != key:
+            propagated.append(candidate)
+        elif not replaced:
+            propagated.append(replace(candidate, confidence=edited.confidence))
+            replaced = True
+    return propagated
 
 
 def _rejection_records(delta: GraphDelta) -> list[dict[str, object]]:
