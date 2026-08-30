@@ -13,12 +13,13 @@ from principle_graph.review import GraphDelta, GraphEdge, GraphEntity, review_an
 class FakeLedgerGraph:
     """GraphWriter + ledger writer applying LedgerWritePlan semantics in memory."""
 
-    def __init__(self):
+    def __init__(self, repeat_mode: str = "keep-first"):
         self.entities = []
         self.rows: list[LedgerRow] = []
         self.arrows: dict[tuple[str, str, str], dict] = {}
         self.rejected: list[dict] = []
         self.legacy_upserts = 0
+        self.repeat_mode = repeat_mode
 
     # --- GraphWriter seam (legacy methods must never fire on the ledger path) ---
     def upsert_entity(self, entity):
@@ -50,8 +51,12 @@ class FakeLedgerGraph:
                               edge.confidence, edge.evidence[0] if edge.evidence else "",
                               edge.scope_conditions)
         existing = [r for r in self.rows if r.identity[:3] == candidate.identity[:3]]
-        plan = plan_ledger_writes(existing, [candidate])
+        plan = plan_ledger_writes(existing, [candidate], mode=self.repeat_mode)
         self.rows.extend(plan.rows_to_create)
+        for updated in plan.rows_to_update:
+            # Refresh replaces the matched row's values in place (issue #59).
+            self.rows = [updated if row.identity == updated.identity else row
+                         for row in self.rows]
         for update in plan.arrow_updates:
             key = (update.subject, update.relation, update.object)
             arrow = self.arrows.setdefault(key, {"confidence": 0.0, "scope_conditions": ""})
@@ -153,3 +158,34 @@ def test_mode2_edit_confidence_recomputes_arrow_over_existing_rows():
     ]
     # 1 - (1 - 0.5)(1 - 0.95)
     assert abs(graph.arrows[("a", "SUPPORTS", "b")]["confidence"] - 0.975) < 1e-9
+
+
+def test_refresh_reingest_updates_the_row_and_recomputes_the_aggregate():
+    """Issue #59 AC: same source re-ingested under refresh with a new confidence
+    keeps exactly one row with updated values and an aggregate recomputed
+    accordingly — the deliberate-refinement counterpart of keep-first idempotency."""
+    graph = FakeLedgerGraph(repeat_mode="refresh")
+    _commit(graph, 0.5, "doc:chunk-1", "first evidence", scope="old scope")
+    _commit(graph, 0.9, "doc:chunk-1", "refined evidence", scope="new scope")
+    rows = graph.rows_for("a", "supports", "b")
+    assert len(rows) == 1
+    (only,) = rows
+    assert only.confidence == 0.9
+    assert only.evidence == "refined evidence"
+    assert only.scope_conditions == "new scope"
+    assert graph.edge("a", "supports", "b")["confidence"] == 0.9
+    assert graph.edge("a", "supports", "b")["scope_conditions"] == "new scope"
+
+
+def test_refresh_and_keep_first_graphs_diverge_on_the_same_reingest():
+    """Same writes, different modes: keep-first keeps the original row, refresh
+    replaces it — observable graph state, not plan internals."""
+    keep = FakeLedgerGraph()
+    refresh = FakeLedgerGraph(repeat_mode="refresh")
+    for graph in (keep, refresh):
+        _commit(graph, 0.5, "doc:chunk-1", "first evidence")
+        _commit(graph, 0.9, "doc:chunk-1", "second evidence")
+    assert keep.rows_for("a", "supports", "b")[0].evidence == "first evidence"
+    assert keep.edge("a", "supports", "b")["confidence"] == 0.5
+    assert refresh.rows_for("a", "supports", "b")[0].evidence == "second evidence"
+    assert refresh.edge("a", "supports", "b")["confidence"] == 0.9
