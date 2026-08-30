@@ -7,7 +7,7 @@ shape is pinned separately in tests/test_neo4j_backends.py.
 """
 from principle_graph.ledger import LedgerRow, complement_aggregate, plan_ledger_writes
 from principle_graph.reduction import assemble_delta, commit_delta
-from principle_graph.review import GraphEdge, GraphEntity, review_and_commit
+from principle_graph.review import GraphDelta, GraphEdge, GraphEntity, review_and_commit
 
 
 class FakeLedgerGraph:
@@ -110,3 +110,46 @@ def test_rejected_verdict_never_touches_the_ledger():
     assert graph.rows == []
     assert graph.arrows == {}
     assert graph.rejected[0]["source_ref"] == "doc:chunk-1"
+
+
+def test_mode2_edit_confidence_lands_in_ledger_rows_and_arrow():
+    """Regression (PR #67 review round 1, P1): the Mode-2 [e]dit path must reach
+    the ledger — the edited confidence is exactly what lands as the row and the
+    recomputed arrow, never the pre-edit candidate value."""
+    graph = FakeLedgerGraph()
+    proposed = assemble_delta(
+        [GraphEdge("a", "supports", "b", 0.6, "doc:chunk-1", ("evidence",), "scope")],
+        entities=[GraphEntity("a", "thing"), GraphEntity("b", "thing")],
+    )
+    answers = iter(["e", "0.95", "a"])
+    review_and_commit(proposed, graph, input_fn=lambda _: next(answers))
+    (row,) = graph.rows
+    assert row.source_ref == "doc:chunk-1"
+    assert row.confidence == 0.95
+    assert graph.arrows[("a", "SUPPORTS", "b")]["confidence"] == 0.95
+
+
+def test_mode2_edit_confidence_recomputes_arrow_over_existing_rows():
+    """A confidence edit on a pending delta recomputes the arrow from all ledger
+    rows: the pre-existing row stays untouched, the edited collapse lands once."""
+    graph = FakeLedgerGraph()
+    first = assemble_delta(
+        [GraphEdge("a", "supports", "b", 0.5, "doc:chunk-0", ("prior",))],
+        entities=[GraphEntity("a", "thing"), GraphEntity("b", "thing")],
+    )
+    review_and_commit(first, graph, input_fn=lambda _: "a")
+    second = GraphDelta(
+        new_edges=[GraphEdge("a", "SUPPORTS", "b", 0.8, "doc:chunk-1", ("e1", "e2"))],
+        raw_candidates=[
+            GraphEdge("a", "supports", "b", 0.6, "doc:chunk-1", ("e1",), "scope-1"),
+            GraphEdge("a", "supports", "b", 0.5, "doc:chunk-2", ("e2",), "scope-2"),
+        ],
+    )
+    answers = iter(["e", "0.95", "a"])
+    review_and_commit(second, graph, input_fn=lambda _: next(answers))
+    assert [(row.source_ref, row.confidence) for row in graph.rows] == [
+        ("doc:chunk-0", 0.5),
+        ("doc:chunk-1", 0.95),
+    ]
+    # 1 - (1 - 0.5)(1 - 0.95)
+    assert abs(graph.arrows[("a", "SUPPORTS", "b")]["confidence"] - 0.975) < 1e-9
