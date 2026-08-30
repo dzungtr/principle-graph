@@ -10,6 +10,7 @@ from typing import Callable
 from .config import Settings
 from .extraction import SequentialExtractor
 from .fanout import query_directions, render_markdown
+from .ledger import resolve_repeat_mode
 from .llm_gateway import OpenAICompatibleMessagesClient
 from .neo4j import Neo4jEntityStore, Neo4jGraphWriter, load_existing_edges
 from .orchestrator import IngestOrchestrator
@@ -204,10 +205,17 @@ def preflight(settings: Settings) -> None:
         )
 
 
-def build_orchestrator(settings: Settings) -> tuple[IngestOrchestrator, object]:
-    """Compose the orchestrator over the real-backend seams for `pg ingest`."""
+def build_orchestrator(settings: Settings, repeat_mode: str | None = None) -> tuple[IngestOrchestrator, object]:
+    """Compose the orchestrator over the real-backend seams for `pg ingest`.
+
+    ``repeat_mode`` overrides ``settings.repeat_mode`` when given; the effective
+    value lands on the writer, which validates it before any session opens.
+    """
     driver = _driver(settings)
-    writer = Neo4jGraphWriter(driver, database=settings.database, rejected_log_path=settings.rejected_log_path)
+    writer = Neo4jGraphWriter(driver, database=settings.database,
+                              rejected_log_path=settings.rejected_log_path,
+                              repeat_mode=repeat_mode if repeat_mode is not None
+                              else settings.repeat_mode)
     store = Neo4jEntityStore(driver, database=settings.database)
     embedder = _build_embedder(settings)
     messages = OpenAICompatibleMessagesClient(
@@ -285,6 +293,7 @@ def ingest_command(
     yes: bool = False,
     input_fn: Callable[[str], str] | None = None,
     out=sys.stdout,
+    repeat_mode: str | None = None,
 ) -> int:
     """Pre-flight, run the orchestrator, and emit the end-of-run stats block.
 
@@ -292,7 +301,20 @@ def ingest_command(
     reject / edit-confidence loop on the terminal. ``yes=True`` opts into
     scripted approval for smoke runs and agents. An explicit ``input_fn``
     (programmatic/test callers) takes precedence over both.
+
+    Repeat-extraction behavior (issue #59): ``repeat_mode`` (the
+    ``--repeat-mode`` flag) takes precedence over the ``PG_REPEAT_MODE`` env var
+    (already resolved into ``settings``); the default is ``keep-first``. Invalid
+    values fail fast with exit code 2 before any pre-flight, model spend, or
+    graph write.
     """
+    try:
+        effective_mode = resolve_repeat_mode(
+            repeat_mode if repeat_mode is not None else settings.repeat_mode
+        )
+    except ValueError as error:
+        print(f"Invalid repeat mode: {error}", file=sys.stderr)
+        return 2
     path = Path(source_path)
     if not path.exists():
         print(f"Source not found: {source_path}", file=sys.stderr)
@@ -303,7 +325,7 @@ def ingest_command(
         print(f"Ingest pre-flight failed: {error}", file=sys.stderr)
         print(f"Hint: {error.remediation}", file=sys.stderr)
         return 1
-    orchestrator, driver = build_orchestrator(settings)
+    orchestrator, driver = build_orchestrator(settings, repeat_mode=effective_mode)
     if input_fn is not None:
         review_input: Callable[[str], str] = input_fn
     elif yes:
@@ -358,7 +380,13 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("path", help="path to a .md/.markdown or .pdf source")
     ingest.add_argument("--yes", action="store_true",
                         help="approve the Mode-2 delta without prompting (smoke runs and agents)")
-    ingest.set_defaults(handler=lambda: ingest_command(Settings.from_env(), args.path, yes=args.yes))
+    ingest.add_argument("--repeat-mode", default=None,
+                        help="repeat-extraction behavior for a claim re-ingested from the "
+                             "same source: keep-first (default; re-ingest is a no-op) or "
+                             "refresh (replace the matched ledger row, then recompute the "
+                             "arrow). Overrides PG_REPEAT_MODE.")
+    ingest.set_defaults(handler=lambda: ingest_command(Settings.from_env(), args.path, yes=args.yes,
+                                                       repeat_mode=args.repeat_mode))
     migrate = subparsers.add_parser(
         "migrate-ledger",
         help="backfill one :ExtractionEvent ledger row per existing typed edge (ADR-0002)",

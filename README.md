@@ -101,6 +101,22 @@ pg ingest path/to/source.md --yes
 If stdin closes before a decision (e.g. piped input without `--yes`), the run
 fails with a reminder to use `--yes` rather than silently approving.
 
+### Repeat-extraction behavior
+
+By default a claim re-ingested from the same source reference is a **no-op**
+(`keep-first`: the matched ledger row is never overwritten, so re-ingest can
+never wobble the graph). To let a source deliberately refine its claim, opt
+into `refresh`: the matched row's values are replaced and the arrow's
+aggregate recomputes from all rows.
+
+```sh
+pg ingest path/to/source.md --repeat-mode refresh
+```
+
+Precedence: the `--repeat-mode` flag overrides the `PG_REPEAT_MODE` env var,
+which overrides the default (`keep-first`). Invalid values fail fast with a
+clear error (exit 2) before any pre-flight or graph write.
+
 ### Environment
 
 `pg ingest` reads the same `.env` settings as the rest of the CLI. The relevant
@@ -113,6 +129,7 @@ variables (all optional; defaults shown):
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Local bge-m3 embeddings service |
 | `OLLAMA_MODEL` | `bge-m3` | Embedding model id |
 | `PG_REJECTED_LOG_PATH` | `.pg/rejected.jsonl` | Where rejected review records are appended |
+| `PG_REPEAT_MODE` | `keep-first` | Repeat-extraction behavior (`keep-first` or `refresh`); overridden by `--repeat-mode` |
 
 ### Pre-flight and exit codes
 
@@ -121,7 +138,7 @@ the uniqueness constraint plus vector index are present. Failures print the
 remediation command on stderr and exit non-zero:
 
 - **1** — pre-flight failed (`pg check` / `pg init` hint printed)
-- **2** — source path missing
+- **2** — source path missing, or an invalid `--repeat-mode` / `PG_REPEAT_MODE` value
 - **3** — orchestrator error during the run
 - **4** — Mode-2 review rejected the delta (nothing committed, JSONL log appended)
 - **0** — approved and committed

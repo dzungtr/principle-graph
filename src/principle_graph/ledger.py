@@ -53,6 +53,24 @@ class LedgerWritePlan:
     rows_to_create: tuple[LedgerRow, ...]
     skipped_identities: tuple[tuple[str, str, str, str], ...]
     arrow_updates: tuple[ArrowUpdate, ...]
+    # Refresh mode only: matched identities replaced by the candidate row.
+    rows_to_update: tuple[LedgerRow, ...] = ()
+
+
+# Repeat-extraction behavior for a matched (triple, source_ref) identity.
+# keep-first (default): re-ingest is a structural no-op (ADR-0002 idempotency).
+# refresh (opt-in): a source deliberately refining its claim replaces its row.
+REPEAT_MODES = ("keep-first", "refresh")
+
+
+def resolve_repeat_mode(value: str) -> str:
+    """Validate and normalize a repeat-mode value; raises ``ValueError`` on junk."""
+    normalized = str(value).strip().casefold()
+    if normalized not in REPEAT_MODES:
+        raise ValueError(
+            f"invalid repeat mode {value!r}: expected one of {', '.join(REPEAT_MODES)}"
+        )
+    return normalized
 
 
 def complement_aggregate(confidences: Sequence[float]) -> float:
@@ -71,52 +89,92 @@ def complement_aggregate(confidences: Sequence[float]) -> float:
 def plan_ledger_writes(
     existing_rows: Sequence[LedgerRow],
     candidates: Sequence[LedgerRow],
+    mode: str = "keep-first",
 ) -> LedgerWritePlan:
-    """Keep-first plan (ADR-0002): identity is the duplicate-skip rule.
+    """Plan the writes for one batch of candidates under a repeat mode.
 
-    A candidate whose ``(subject, relation, object, source_ref)`` identity matches
-    an existing row is skipped — matched rows are never overwritten. New
-    identities append; every touched arrow recomputes its aggregate from all
-    rows for the triple (existing plus appended), so re-ingest can only leave
-    the arrow unchanged, never wobble it.
+    ``keep-first`` (default, ADR-0002): identity is the duplicate-skip rule —
+    a candidate whose ``(subject, relation, object, source_ref)`` identity matches
+    an existing row is skipped and matched rows are never overwritten; re-ingest
+    can only leave the arrow unchanged, never wobble it.
+
+    ``refresh`` (opt-in): a matched identity is *replaced* by the candidate — the
+    refreshed row lands in ``rows_to_update``, the arrow recompute uses the
+    refreshed value, and the refreshed row is the newest row for scope purposes.
+    Within one batch the last candidate for an identity wins.
+
+    Under both modes new identities append, and every touched arrow recomputes
+    its aggregate from all rows for the triple (with refreshed values applied).
     """
+    repeat_mode = resolve_repeat_mode(mode)
     existing_by_identity = {row.identity: row for row in existing_rows}
     creates: list[LedgerRow] = []
-    skips: list[tuple[str, str, str, str]] = []
+    skipped: list[tuple[str, str, str, str]] = []
+    refreshed: list[LedgerRow] = []
+    refreshed_by_identity: dict[tuple[str, str, str, str], LedgerRow] = {}
+    created_identities: set[tuple[str, str, str, str]] = set()
     seen: set[tuple[str, str, str, str]] = set(existing_by_identity)
     triple_order: list[tuple[str, str, str]] = []
     newest_scope: dict[tuple[str, str, str], str] = {}
     for candidate in candidates:
         triple = candidate.identity[:3]
         if candidate.identity in seen:
-            skips.append(candidate.identity)
-            # Skipped writes still recompute their arrow (idempotently) but never
-            # move its scope: there is no newer row to take scope from.
-            if triple not in newest_scope:
-                triple_order.append(triple)
-                newest_scope[triple] = ""
+            if repeat_mode == "refresh":
+                # Deliberate refinement: a repeat either replaces a pending
+                # create (last wins, still one write) or becomes a row update.
+                if candidate.identity in created_identities:
+                    creates = [row for row in creates
+                               if row.identity != candidate.identity]
+                    created_identities.discard(candidate.identity)
+                    refreshed.append(candidate)
+                    refreshed_by_identity[candidate.identity] = candidate
+                else:
+                    refreshed = [row for row in refreshed
+                                 if row.identity != candidate.identity]
+                    refreshed.append(candidate)
+                    refreshed_by_identity[candidate.identity] = candidate
+                if triple not in newest_scope:
+                    triple_order.append(triple)
+                newest_scope[triple] = candidate.scope_conditions
+            else:
+                skipped.append(candidate.identity)
+                # Skipped writes still recompute their arrow (idempotently) but
+                # never move its scope: no newer row to take scope from.
+                if triple not in newest_scope:
+                    triple_order.append(triple)
+                    newest_scope[triple] = ""
             continue
         seen.add(candidate.identity)
         creates.append(candidate)
+        created_identities.add(candidate.identity)
         if triple not in newest_scope:
             triple_order.append(triple)
         newest_scope[triple] = candidate.scope_conditions
     updates: list[ArrowUpdate] = []
     for triple in triple_order:
-        confidences = [row.confidence for row in existing_rows
+        confidences = [refreshed_by_identity.get(
+                           row.identity, row).confidence for row in existing_rows
                        if row.identity[:3] == triple]
         confidences += [row.confidence for row in creates
                         if row.identity[:3] == triple]
+        # Refreshed rows that replaced a batch-created row are no longer in
+        # `creates` and have no existing row to substitute for.
+        confidences += [row.confidence for row in refreshed
+                        if row.identity[:3] == triple
+                        and row.identity not in existing_by_identity]
         updates.append(ArrowUpdate(triple[0], triple[1], triple[2],
                                    complement_aggregate(confidences),
                                    newest_scope[triple]))
-    return LedgerWritePlan(tuple(creates), tuple(skips), tuple(updates))
+    return LedgerWritePlan(tuple(creates), tuple(skipped), tuple(updates),
+                           tuple(refreshed))
 
 
 __all__ = [
+    "REPEAT_MODES",
     "ArrowUpdate",
     "LedgerRow",
     "LedgerWritePlan",
     "complement_aggregate",
     "plan_ledger_writes",
+    "resolve_repeat_mode",
 ]

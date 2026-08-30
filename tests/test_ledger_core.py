@@ -128,3 +128,100 @@ def test_distinct_triples_get_distinct_arrow_updates():
     by_subject = {u.subject: u for u in plan.arrow_updates}
     assert by_subject["a"].aggregate_confidence == 0.5
     assert by_subject["c"].aggregate_confidence == 0.9
+
+
+# ---------------------------------------------------------------------------
+# Repeat modes (issue #59): keep-first default vs opt-in refresh.
+# ---------------------------------------------------------------------------
+
+from principle_graph.ledger import REPEAT_MODES, resolve_repeat_mode
+
+
+def test_resolve_repeat_mode_accepts_canonical_and_variations():
+    assert resolve_repeat_mode("keep-first") == "keep-first"
+    assert resolve_repeat_mode("refresh") == "refresh"
+    assert resolve_repeat_mode("REFRESH") == "refresh"
+    assert resolve_repeat_mode(" Keep-First ") == "keep-first"
+
+
+def test_resolve_repeat_mode_rejects_unknown_values_with_clear_error():
+    try:
+        resolve_repeat_mode("overwrite")
+    except ValueError as exc:
+        assert "overwrite" in str(exc)
+        assert "keep-first" in str(exc) and "refresh" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for unknown repeat mode")
+
+
+def test_repeat_mode_vocabulary_is_exactly_the_two_documented_modes():
+    assert REPEAT_MODES == ("keep-first", "refresh")
+
+
+def test_explicit_keep_first_mode_is_identical_to_the_default_plan():
+    existing = [row(source_ref="s1", confidence=0.5, scope_conditions="old")]
+    candidates = [row(source_ref="s1", confidence=0.9, evidence="second")]
+    assert (plan_ledger_writes(existing, candidates, mode="keep-first")
+            == plan_ledger_writes(existing, candidates))
+
+
+def test_refresh_replaces_matched_row_values_instead_of_skipping():
+    existing = [row(source_ref="s1", confidence=0.5, evidence="first",
+                    scope_conditions="old scope")]
+    candidate = row(source_ref="s1", confidence=0.9, evidence="refined",
+                    scope_conditions="new scope")
+    plan = plan_ledger_writes(existing, [candidate], mode="refresh")
+    assert plan.rows_to_create == ()
+    assert plan.skipped_identities == ()
+    assert plan.rows_to_update == (candidate,)
+    # The refreshed row is the newest row: its scope becomes the arrow's scope
+    # and its confidence is what the aggregate recomputes from.
+    assert plan.arrow_updates == (ArrowUpdate("a", "SUPPORTS", "b", 0.9, "new scope"),)
+
+
+def test_keep_first_and_refresh_produce_different_plans_for_same_input():
+    existing = [row(source_ref="s1", confidence=0.5, evidence="first")]
+    candidates = [row(source_ref="s1", confidence=0.9, evidence="second")]
+    keep = plan_ledger_writes(existing, candidates)
+    refresh = plan_ledger_writes(existing, candidates, mode="refresh")
+    assert keep.skipped_identities == (("a", "SUPPORTS", "b", "s1"),)
+    assert keep.rows_to_update == ()
+    assert refresh.skipped_identities == ()
+    assert [r.confidence for r in refresh.rows_to_update] == [0.9]
+    assert keep.arrow_updates[0].aggregate_confidence == 0.5
+    assert refresh.arrow_updates[0].aggregate_confidence == 0.9
+
+
+def test_refresh_recompute_uses_refreshed_value_over_all_rows():
+    existing = [row(source_ref="s1", confidence=0.5), row(source_ref="s2", confidence=0.5)]
+    plan = plan_ledger_writes(existing, [row(source_ref="s1", confidence=0.9)],
+                              mode="refresh")
+    # 1 - (1 - 0.9)(1 - 0.5): the other row still corroborates.
+    assert plan.arrow_updates == (ArrowUpdate("a", "SUPPORTS", "b", 0.95, ""),)
+
+
+def test_refresh_within_batch_last_candidate_wins():
+    plan = plan_ledger_writes([], [row(source_ref="s1", confidence=0.5, evidence="a"),
+                                   row(source_ref="s1", confidence=0.9, evidence="b")],
+                              mode="refresh")
+    assert plan.rows_to_create == ()
+    assert [r.confidence for r in plan.rows_to_update] == [0.9]
+    assert plan.arrow_updates == (ArrowUpdate("a", "SUPPORTS", "b", 0.9, ""),)
+
+
+def test_refresh_still_creates_rows_for_new_identities():
+    existing = [row(source_ref="s1", confidence=0.5)]
+    plan = plan_ledger_writes(existing, [row(source_ref="s2", confidence=0.5)],
+                              mode="refresh")
+    assert [r.source_ref for r in plan.rows_to_create] == ["s2"]
+    assert plan.rows_to_update == ()
+    assert plan.arrow_updates == (ArrowUpdate("a", "SUPPORTS", "b", 0.75, ""),)
+
+
+def test_unknown_mode_raises_before_any_planning():
+    try:
+        plan_ledger_writes([], [row()], mode="overwrite")
+    except ValueError as exc:
+        assert "repeat mode" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for unknown mode")
