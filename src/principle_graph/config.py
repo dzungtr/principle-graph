@@ -30,6 +30,10 @@ class Settings:
     # Mirrors fanout.QUERY_SEED_SIMILARITY; pinned equal by test.
     query_seed_similarity: float = 0.60
     rejected_log_path: str = ".pg/rejected.jsonl"
+    # Repeat-extraction behavior for re-ingested claims (PRD #57): keep-first
+    # (default) or refresh. Validated by ledger.resolve_repeat_mode at the
+    # write boundary; invalid PG_REPEAT_MODE fails fast on `pg ingest`.
+    repeat_mode: str = "keep-first"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -44,4 +48,5 @@ class Settings:
             ollama_model=os.getenv("OLLAMA_MODEL", cls.ollama_model),
             query_seed_similarity=_env_float("PG_QUERY_SEED_SIMILARITY", cls.query_seed_similarity),
             rejected_log_path=os.getenv("PG_REJECTED_LOG_PATH", cls.rejected_log_path),
+            repeat_mode=os.getenv("PG_REPEAT_MODE", cls.repeat_mode),
         )

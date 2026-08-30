@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .ledger import LedgerRow, plan_ledger_writes
+from .ledger import LedgerRow, plan_ledger_writes, resolve_repeat_mode
 from .reduction import GraphEdge, GraphEntity
 from .resolution import Entity, SimilarEntity
 
@@ -48,10 +48,13 @@ class Neo4jGraphWriter:
         driver: Any,
         database: str = "neo4j",
         rejected_log_path: str | Path = ".pg/rejected.jsonl",
+        repeat_mode: str = "keep-first",
     ) -> None:
         self.driver = driver
         self.database = database
         self.rejected_sink = RejectedRecordSink(rejected_log_path)
+        # Invalid modes raise here, before any session opens (issue #59 AC 2).
+        self.repeat_mode = resolve_repeat_mode(repeat_mode)
 
     def upsert_entity(self, entity: GraphEntity) -> None:
         query = (
@@ -110,13 +113,24 @@ class Neo4jGraphWriter:
         "e.created_at = datetime(), e.updated_at = datetime() "
         "ON MATCH SET e.updated_at = datetime()"
     )
+    # Refresh mode (issue #59): the matched row's values are replaced in place;
+    # created_at is preserved so get_edge's row ordering stays stable.
+    _ROW_REFRESH_QUERY = (
+        "MATCH (s:Entity {name: $subject})-[:REPORTED]->"
+        "(e:ExtractionEvent {relation: $relation, source_ref: $source_ref})-[:ABOUT]->"
+        "(o:Entity {name: $object}) "
+        "SET e.confidence = $confidence, e.evidence = $evidence, "
+        "e.scope_conditions = $scope_conditions, e.domain = $domain, "
+        "e.updated_at = datetime()"
+    )
 
     def upsert_extraction(self, edge: GraphEdge) -> None:
         """Append one accepted extraction as a ledger row and recompute the arrow.
 
-        The keep-first plan comes from the pure ledger module; this adapter only
-        executes it. The arrow's derived aggregate is recomputed from all rows
-        for the triple on every call — never set independently.
+        The plan comes from the pure ledger module under this writer's repeat
+        mode (keep-first default; refresh replaces matched rows); this adapter
+        only executes it. The arrow's derived aggregate is recomputed from all
+        rows for the triple on every call — never set independently.
         """
         relation = _relation(edge.relation)
         candidate = LedgerRow(
@@ -135,10 +149,22 @@ class Neo4jGraphWriter:
                     relation=relation,
                 )
             ]
-            plan = plan_ledger_writes(existing, [candidate])
+            plan = plan_ledger_writes(existing, [candidate], mode=self.repeat_mode)
             for row in plan.rows_to_create:
                 session.run(
                     self._ROW_MERGE_QUERY,
+                    subject=row.subject,
+                    object=row.object,
+                    relation=row.relation,
+                    source_ref=row.source_ref,
+                    confidence=row.confidence,
+                    evidence=row.evidence,
+                    scope_conditions=row.scope_conditions,
+                    domain=row.domain,
+                )
+            for row in plan.rows_to_update:
+                session.run(
+                    self._ROW_REFRESH_QUERY,
                     subject=row.subject,
                     object=row.object,
                     relation=row.relation,

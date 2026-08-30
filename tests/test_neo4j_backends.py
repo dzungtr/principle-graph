@@ -371,3 +371,66 @@ def _edge_row(edge: GraphEdge) -> dict:
         "evidence": list(edge.evidence),
         "scope_conditions": edge.scope_conditions,
     }
+
+
+# ---------------------------------------------------------------------------
+# Repeat-mode treatment of matched rows (issue #59).
+# ---------------------------------------------------------------------------
+
+from principle_graph.neo4j import resolve_repeat_mode as _writer_mode_validator  # noqa: E402
+
+
+def test_writer_defaults_to_keep_first():
+    writer = Neo4jGraphWriter(RecordingDriver())
+    assert writer.repeat_mode == "keep-first"
+
+
+def test_writer_rejects_invalid_repeat_mode_before_any_session_opens():
+    driver = RecordingDriver()
+    with pytest.raises(ValueError, match="invalid repeat mode"):
+        Neo4jGraphWriter(driver, repeat_mode="overwrite")
+    assert driver.sessions == []  # no write, not even a read, was attempted
+
+
+def test_writer_refresh_mode_updates_the_matched_row_instead_of_merging():
+    existing_row = {
+        "source_ref": "doc:chunk-1", "confidence": 0.5,
+        "evidence": "first evidence", "scope_conditions": "old scope",
+    }
+    driver = RecordingDriver(rows=[existing_row])
+    writer = Neo4jGraphWriter(driver, repeat_mode="refresh")
+    writer.upsert_extraction(
+        GraphEdge("a", "supports", "b", 0.9, "doc:chunk-1", ("refined evidence",), "new scope")
+    )
+    (session,) = driver.sessions
+    [load, refresh_row, arrow] = session.queries
+    # Row load precedes planning; the row write is an in-place update, not a
+    # create-merge; the arrow carries the refreshed aggregate.
+    assert "ExtractionEvent {relation: $relation}" in load[0] and "RETURN" in load[0]
+    assert "SET e.confidence = $confidence, e.evidence = $evidence" in refresh_row[0]
+    assert "MERGE (s)-[:REPORTED]->" not in refresh_row[0]
+    assert refresh_row[1] == {
+        "subject": "a", "object": "b", "relation": "SUPPORTS",
+        "source_ref": "doc:chunk-1", "confidence": 0.9,
+        "evidence": "refined evidence", "scope_conditions": "new scope", "domain": "",
+    }
+    assert arrow[1]["aggregate_confidence"] == 0.9
+    assert arrow[1]["scope_conditions"] == "new scope"
+    assert len(session.queries) == 3
+
+
+def test_writer_refresh_mode_still_merges_new_identities():
+    driver = RecordingDriver(rows=[])
+    writer = Neo4jGraphWriter(driver, repeat_mode="refresh")
+    writer.upsert_extraction(
+        GraphEdge("a", "supports", "b", 0.7, "doc:chunk-9", ("evidence",))
+    )
+    (session,) = driver.sessions
+    [load, create, arrow] = session.queries
+    assert "MERGE (s)-[:REPORTED]->" in create[0]
+    assert create[1]["source_ref"] == "doc:chunk-9"
+    assert arrow[1]["aggregate_confidence"] == 0.7
+
+
+def test_writer_accepts_mode_variations_via_shared_validator():
+    assert _writer_mode_validator(" Refresh ") == "refresh"

@@ -29,6 +29,7 @@ class _SettingsFactory:
         self.uri = uri
         self.database = database
         self.rejected_log_path = ".pg/rejected.jsonl"
+        self.repeat_mode = "keep-first"
         self.user = "neo4j"
         self.password = "principlegraph"
         self.llm_base_url = "http://localhost:8000"
@@ -225,7 +226,7 @@ def test_ingest_command_exit_zero_on_approved(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("principle_graph.cli.preflight", lambda _s: None)
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s: (_FakeOrchestrator("approved"), _FakeWriter()),
+        lambda _s, repeat_mode=None: (_FakeOrchestrator("approved"), _FakeWriter()),
     )
     out = io.StringIO()
     with redirect_stdout(out):
@@ -241,7 +242,7 @@ def test_ingest_command_exit_nonzero_on_rejected(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("principle_graph.cli.preflight", lambda _s: None)
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s: (_FakeOrchestrator("rejected"), _FakeWriter()),
+        lambda _s, repeat_mode=None: (_FakeOrchestrator("rejected"), _FakeWriter()),
     )
     out, err = io.StringIO(), io.StringIO()
     with redirect_stdout(out), redirect_stderr(err):
@@ -263,7 +264,7 @@ def test_ingest_command_passes_input_fn_through_to_orchestrator(monkeypatch, tmp
     orchestrator = _FakeOrchestrator("approved")
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s: (orchestrator, _FakeWriter()),
+        lambda _s, repeat_mode=None: (orchestrator, _FakeWriter()),
     )
 
     def scripted(_prompt: str) -> str:
@@ -291,7 +292,7 @@ def test_ingest_command_defaults_to_interactive_review(monkeypatch, tmp_path: Pa
     orchestrator = _FakeOrchestrator("approved")
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s: (orchestrator, _FakeWriter()),
+        lambda _s, repeat_mode=None: (orchestrator, _FakeWriter()),
     )
     out = io.StringIO()
     with redirect_stdout(out):
@@ -310,7 +311,7 @@ def test_ingest_command_yes_opts_into_scripted_approval(monkeypatch, tmp_path: P
     orchestrator = _FakeOrchestrator("approved")
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s: (orchestrator, _FakeWriter()),
+        lambda _s, repeat_mode=None: (orchestrator, _FakeWriter()),
     )
     out = io.StringIO()
     with redirect_stdout(out):
@@ -337,18 +338,20 @@ def test_interactive_input_eof_suggests_yes(monkeypatch):
 def test_main_ingest_wires_yes_flag(monkeypatch, tmp_path: Path):
     captured: dict[str, object] = {}
 
-    def _fake_ingest(settings, path, *, yes=False, input_fn=None, out=None):
+    def _fake_ingest(settings, path, *, yes=False, input_fn=None, out=None,
+                     repeat_mode=None):
         captured["yes"] = yes
         captured["path"] = path
+        captured["repeat_mode"] = repeat_mode
         return 0
 
     monkeypatch.setattr("principle_graph.cli.ingest_command", _fake_ingest)
     source = tmp_path / "demo.md"
     source.write_text("# Demo", encoding="utf-8")
     assert main(["ingest", str(source)]) == 0
-    assert captured == {"yes": False, "path": str(source)}
+    assert captured == {"yes": False, "path": str(source), "repeat_mode": None}
     assert main(["ingest", str(source), "--yes"]) == 0
-    assert captured == {"yes": True, "path": str(source)}
+    assert captured == {"yes": True, "path": str(source), "repeat_mode": None}
 
 
 # ---------------------------------------------------------------------------
@@ -383,3 +386,107 @@ def test_build_orchestrator_returns_orchestrator_and_driver():
     assert isinstance(orchestrator, IngestOrchestrator)
     assert driver is not None
     driver.close()
+
+
+# ---------------------------------------------------------------------------
+# Repeat-mode surfaces (issue #59): flag > PG_REPEAT_MODE > keep-first default.
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_command_invalid_flag_mode_fails_fast_before_any_write(monkeypatch, tmp_path: Path):
+    settings = _settings()
+    source = tmp_path / "demo.md"
+    source.write_text("# Demo", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr("principle_graph.cli.preflight",
+                        lambda _s: calls.append("preflight"))
+    monkeypatch.setattr("principle_graph.cli.build_orchestrator",
+                        lambda _s, repeat_mode=None: calls.append("build") or (_FakeOrchestrator("approved"), _FakeWriter()))
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = ingest_command(settings, str(source), repeat_mode="overwrite", out=out)
+    assert code == 2
+    assert "overwrite" in err.getvalue()
+    assert "keep-first" in err.getvalue() and "refresh" in err.getvalue()
+    assert calls == []  # no pre-flight, no orchestrator, no write
+
+
+def test_ingest_command_invalid_env_mode_fails_fast_before_any_write(monkeypatch, tmp_path: Path):
+    from principle_graph.config import Settings
+    monkeypatch.setenv("PG_REPEAT_MODE", "overwrite")
+    settings = Settings.from_env()
+    source = tmp_path / "demo.md"
+    source.write_text("# Demo", encoding="utf-8")
+    monkeypatch.setattr("principle_graph.cli.preflight",
+                        lambda _s: (_ for _ in ()).throw(AssertionError("preflight reached")))
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = ingest_command(settings, str(source), out=out)
+    assert code == 2
+    assert "overwrite" in err.getvalue()
+
+
+def test_ingest_command_flag_overrides_env(monkeypatch, tmp_path: Path):
+    from principle_graph.config import Settings
+    monkeypatch.setenv("PG_REPEAT_MODE", "refresh")
+    settings = Settings.from_env()
+    source = tmp_path / "demo.md"
+    source.write_text("# Demo", encoding="utf-8")
+    monkeypatch.setattr("principle_graph.cli.preflight", lambda _s: None)
+    received: list[str | None] = []
+    monkeypatch.setattr(
+        "principle_graph.cli.build_orchestrator",
+        lambda _s, repeat_mode=None: received.append(repeat_mode)
+        or (_FakeOrchestrator("approved"), _FakeWriter()),
+    )
+    with redirect_stdout(io.StringIO()):
+        code = ingest_command(settings, str(source), repeat_mode="keep-first")
+    assert code == 0
+    assert received == ["keep-first"]
+
+
+def test_ingest_command_env_mode_flows_to_writer_when_flag_absent(monkeypatch, tmp_path: Path):
+    from principle_graph.config import Settings
+    monkeypatch.setenv("PG_REPEAT_MODE", "refresh")
+    settings = Settings.from_env()
+    source = tmp_path / "demo.md"
+    source.write_text("# Demo", encoding="utf-8")
+    monkeypatch.setattr("principle_graph.cli.preflight", lambda _s: None)
+    received: list[str | None] = []
+    monkeypatch.setattr(
+        "principle_graph.cli.build_orchestrator",
+        lambda _s, repeat_mode=None: received.append(repeat_mode)
+        or (_FakeOrchestrator("approved"), _FakeWriter()),
+    )
+    with redirect_stdout(io.StringIO()):
+        ingest_command(settings, str(source))
+    assert received == ["refresh"]
+
+
+def test_build_orchestrator_passes_mode_to_writer(monkeypatch):
+    from principle_graph import cli
+    from principle_graph.neo4j import Neo4jGraphWriter
+
+    class _Driver:
+        def session(self, database=None):
+            raise AssertionError("no session expected while composing")
+
+    monkeypatch.setattr(cli, "_driver", lambda _s: _Driver())
+    monkeypatch.setattr(cli, "_build_embedder", lambda _s: None)
+    settings = _settings()
+    refresh_orchestrator, _ = cli.build_orchestrator(settings, repeat_mode="refresh")
+    assert refresh_orchestrator.writer.repeat_mode == "refresh"
+    default_orchestrator, _ = cli.build_orchestrator(settings)
+    assert default_orchestrator.writer.repeat_mode == "keep-first"
+    assert isinstance(refresh_orchestrator.writer, Neo4jGraphWriter)
+
+
+def test_ingest_help_documents_repeat_mode_and_precedence():
+    from contextlib import redirect_stdout, suppress
+    buf = io.StringIO()
+    with redirect_stdout(buf), suppress(SystemExit):
+        main(["ingest", "--help"])
+    text = buf.getvalue()
+    assert "--repeat-mode" in text
+    assert "keep-first" in text and "refresh" in text
+    assert "PG_REPEAT_MODE" in text  # precedence documented in the help itself
