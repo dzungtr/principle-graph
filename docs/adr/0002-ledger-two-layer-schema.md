@@ -4,6 +4,8 @@ Date: 2026-08-29 · Status: accepted · PRD: #57
 
 The prototype stored each relationship as a single typed edge carrying one aggregate confidence plus an evidence list, updated in place. `confidence-policy.md` (2026-08-03) accepted complement aggregation and append-only evidence, but that policy is unimplementable on this shape: there is nowhere to put per-extraction facts. The actual write path was last-write-wins — a second source extracting the same claim destroyed the first's confidence and evidence (verified in the 2026-08-29 smoke test). Corroboration was invisible and disagreement unqueryable.
 
+## Decision
+
 Decision: split current state from history into two layers. The typed relationship survives as the **Arrow** — current state only: one derived aggregate confidence (recomputed as `1 − Π(1 − ci)` over accepted rows, clamped, never set independently) plus a denormalized latest-merged scope condition. History moves to **`:ExtractionEvent` ledger rows** — one append-only node per accepted extraction, identified by `(subject, relation, object, source_ref)`, wired via `(:Entity)-[:REPORTED]->(:ExtractionEvent)-[:ABOUT]->(:Entity)`, each carrying its own event confidence, single-string evidence, scope conditions, source ref, optional domain tag, relation, and timestamps. Ledger identity makes same-source re-extraction a structural no-op (keep-first, the default); a `refresh` mode may update a matched row deliberately, then recompute. Mode-2 rejects stay in the JSONL sidecar — the ledger holds accepted events only. The existing graph migrates in place: each edge becomes exactly one row; single-row aggregates equal prior confidences, so no arrow moves.
 
 ## Considered Options
