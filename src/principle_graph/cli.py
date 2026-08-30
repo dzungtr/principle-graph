@@ -75,15 +75,8 @@ class _Neo4jQueryGraph:
             return [Entity(f"{row['type']}:{row['name']}", row['name'], row['type'], embedding=tuple(row['embedding']) if row['embedding'] else None) for row in rows]
 
     def edges_for(self, entity):
-        from .review import GraphEdge
-        with self.driver.session(database=self.database) as session:
-            rows = session.run("""MATCH (a:Entity)-[r]->(b:Entity)
-                WHERE a.name = $name OR b.name = $name
-                RETURN a.name AS subject, type(r) AS relation, b.name AS object,
-                       r.confidence AS confidence, r.source_ref AS source_ref,
-                       r.evidence AS evidence, r.scope_conditions AS scope_conditions""", name=entity.name)
-            return [GraphEdge(row['subject'], row['relation'], row['object'], row['confidence'],
-                              row['source_ref'] or '', tuple(row['evidence'] or ()), row['scope_conditions'] or '') for row in rows]
+        writer = Neo4jGraphWriter(self.driver, self.database)
+        return writer.edges_for_entity(entity.name)
 
 
 def query_command(settings: Settings, text: str, top_k: int, max_edges: int, output_format: str) -> int:

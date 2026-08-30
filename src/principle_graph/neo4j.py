@@ -28,6 +28,25 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"not JSON serializable: {type(value).__name__}")
 
 
+def assemble_provenance(
+    row_refs: Sequence[str | None] | None,
+    row_evidence: Sequence[str | None] | None,
+    legacy_source_ref: str | None,
+    legacy_evidence: Sequence[str] | None,
+) -> tuple[str, tuple[str, ...]]:
+    """Arrow→ledger provenance join shared by every read path (issue #61).
+
+    Rows win: the newest row's source reference and the collected row evidence
+    strings (created_at order). Legacy arrow properties answer only while an
+    arrow is unmigrated (no rows); the #60 backfill removes them, so this
+    fallback is the migration-safe bridge, not a second source of truth.
+    """
+    refs = [ref for ref in (row_refs or []) if ref]
+    evidence = [item for item in (row_evidence or []) if item]
+    source_ref = refs[-1] if refs else (legacy_source_ref or "")
+    return source_ref, tuple(evidence) or tuple(legacy_evidence or [])
+
+
 class RejectedRecordSink:
     """Append rejected review records to a local JSONL log (parent dir created on demand)."""
 
@@ -352,10 +371,11 @@ class Neo4jGraphWriter:
             if hasattr(record, "get")
             else (lambda key, default=None: record[key] if key in record else default)
         )
-        row_refs = [ref for ref in (get("row_refs") or []) if ref]
-        row_evidence = [item for item in (get("row_evidence") or []) if item]
-        source_ref = row_refs[-1] if row_refs else (get("legacy_source_ref") or "")
-        evidence = tuple(row_evidence) or tuple(get("legacy_evidence") or [])
+        row_refs = get("row_refs")
+        row_evidence = get("row_evidence")
+        source_ref, evidence = assemble_provenance(
+            row_refs, row_evidence, get("legacy_source_ref"), get("legacy_evidence")
+        )
         return GraphEdge(
             get("subject"),
             get("relation"),
@@ -365,6 +385,36 @@ class Neo4jGraphWriter:
             evidence,
             get("scope_conditions", "") or "",
         )
+
+    def edges_for_entity(self, name: str) -> list[GraphEdge]:
+        """All arrows touching *name* for the fan-out hot path, provenance
+        joined from the ledger in one OPTIONAL hop. Arrows are still matched
+        directly — the ledger never sits on the hot path (PRD #57 Read paths).
+        """
+        query = (
+            "MATCH (a:Entity)-[r]->(b:Entity) "
+            "WHERE a.name = $name OR b.name = $name "
+            "OPTIONAL MATCH (a)-[:REPORTED]->"
+            "(e:ExtractionEvent {relation: type(r)})-[:ABOUT]->(b) "
+            "WITH a, r, b, e ORDER BY e.created_at "
+            "RETURN a.name AS subject, type(r) AS relation, b.name AS object, "
+            "r.confidence AS confidence, r.scope_conditions AS scope_conditions, "
+            "r.source_ref AS legacy_source_ref, r.evidence AS legacy_evidence, "
+            "collect(e.source_ref) AS row_refs, collect(e.evidence) AS row_evidence"
+        )
+        with self.driver.session(database=self.database) as session:
+            rows = session.run(query, name=name)
+            return [
+                GraphEdge(
+                    row["subject"], row["relation"], row["object"], row["confidence"],
+                    *assemble_provenance(
+                        row["row_refs"], row["row_evidence"],
+                        row["legacy_source_ref"], row["legacy_evidence"],
+                    ),
+                    row["scope_conditions"] or "",
+                )
+                for row in rows
+            ]
 
     def record_rejected(self, record: dict[str, object]) -> None:
         self.rejected_sink.record_rejected(record)

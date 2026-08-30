@@ -434,3 +434,76 @@ def test_writer_refresh_mode_still_merges_new_identities():
 
 def test_writer_accepts_mode_variations_via_shared_validator():
     assert _writer_mode_validator(" Refresh ") == "refresh"
+
+
+# ---------------------------------------------------------------------------
+# Fan-out provenance join: Arrow→ledger hop (issue #61).
+# ---------------------------------------------------------------------------
+
+
+def test_edges_for_entity_matches_arrows_only_and_joins_rows_in_one_hop():
+    driver = RecordingDriver()
+    writer = Neo4jGraphWriter(driver)
+    writer.edges_for_entity("rates")
+    (session,) = driver.sessions
+    [(query, params)] = session.queries
+    # Hot path: arrows matched directly; the ledger is a single OPTIONAL hop.
+    assert query.startswith("MATCH (a:Entity)-[r]->(b:Entity) ")
+    assert "WHERE a.name = $name OR b.name = $name" in query
+    assert ("OPTIONAL MATCH (a)-[:REPORTED]->"
+            "(e:ExtractionEvent {relation: type(r)})-[:ABOUT]->(b)") in query
+    assert "ORDER BY e.created_at" in query
+    assert params == {"name": "rates"}
+
+
+def test_edges_for_entity_sources_provenance_from_rows_newest_last():
+    row = {
+        "subject": "rates", "relation": "MAY_DESCRIBE", "object": "target",
+        "confidence": 0.95, "scope_conditions": "loose usage",
+        "legacy_source_ref": None, "legacy_evidence": None,
+        "row_refs": ["doc:chunk-1", "doc:chunk-2"],
+        "row_evidence": ["first claim", "second claim"],
+    }
+    driver = RecordingDriver(rows=[row])
+    edge = Neo4jGraphWriter(driver).edges_for_entity("rates")[0]
+    assert edge == GraphEdge("rates", "MAY_DESCRIBE", "target", 0.95,
+                             "doc:chunk-2", ("first claim", "second claim"), "loose usage")
+
+
+def test_edges_for_entity_falls_back_to_legacy_arrow_properties_when_unmigrated():
+    row = {
+        "subject": "other", "relation": "HEDGES", "object": "rates",
+        "confidence": 0.9, "scope_conditions": "crisis only",
+        "legacy_source_ref": "book:2", "legacy_evidence": ["hedge claim"],
+        "row_refs": [None], "row_evidence": [None],
+    }
+    driver = RecordingDriver(rows=[row])
+    edge = Neo4jGraphWriter(driver).edges_for_entity("rates")[0]
+    assert edge.source_ref == "book:2"
+    assert edge.evidence == ("hedge claim",)
+
+
+def test_edges_for_entity_joins_provenance_per_arrow_in_mixed_pairs():
+    # Two arrows on one pair, different relations: the migrated one sources
+    # rows, the unmigrated one keeps its legacy props — no cross-contamination
+    # (the failure mode flagged as follow-up #70 for migrate_ledger).
+    rows = [
+        {
+            "subject": "rates", "relation": "MAY_DESCRIBE", "object": "target",
+            "confidence": 0.95, "scope_conditions": "loose",
+            "legacy_source_ref": "stale:ref", "legacy_evidence": ["stale"],
+            "row_refs": ["doc:chunk-2"], "row_evidence": ["second claim"],
+        },
+        {
+            "subject": "target", "relation": "ANCHORS", "object": "rates",
+            "confidence": 0.4, "scope_conditions": "narrow",
+            "legacy_source_ref": "book:7", "legacy_evidence": ["anchor claim"],
+            "row_refs": [None], "row_evidence": [None],
+        },
+    ]
+    driver = RecordingDriver(rows=rows)
+    edges = Neo4jGraphWriter(driver).edges_for_entity("rates")
+    assert [(e.relation, e.source_ref, e.evidence) for e in edges] == [
+        ("MAY_DESCRIBE", "doc:chunk-2", ("second claim",)),
+        ("ANCHORS", "book:7", ("anchor claim",)),
+    ]
