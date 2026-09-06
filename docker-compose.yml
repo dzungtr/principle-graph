@@ -9,7 +9,7 @@ services:
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-principlegraph}
     volumes:
       - neo4j_data:/data
-      # - ./docs/schema/neo4j-schema.cypher:/var/lib/neo4j/import/neo4j-schema.cypher:rw
+      # - ./src/principle_graph/data/neo4j-schema.cypher:/var/lib/neo4j/import/neo4j-schema.cypher:rw
 
 volumes:
   neo4j_data:

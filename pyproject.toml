@@ -7,10 +7,13 @@ name = "principle-graph"
 version = "0.1.0"
 description = "Local knowledge graph memory prototype"
 requires-python = ">=3.12"
-dependencies = ["neo4j>=5.0,<6", "PyMuPDF>=1.24,<2"]
+dependencies = ["neo4j>=5.0,<6", "PyMuPDF>=1.24,<2", "PyYAML>=6.0,<7"]
 
 [project.scripts]
 pg = "principle_graph.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+principle_graph = ["data/*.cypher"]

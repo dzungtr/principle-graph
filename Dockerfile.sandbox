@@ -1,0 +1,12 @@
+# Coding-agent sandbox image: openshell-v2 base + principle-graph grafted at build time.
+# Build:  podman build -t pg-osh:latest -f Dockerfile.sandbox .
+# Run:    openshell sandbox create --name pg-dev --from pg-osh:latest
+FROM ghcr.io/dzungtr/pi-openshell:0.1.0-openrouter
+USER root
+COPY . /opt/principle-graph
+RUN mkdir -p /etc/nix && printf 'experimental-features = nix-command flakes\nsandbox = false\nbuild-users-group =\n' >> /etc/nix/nix.conf \
+ && nix profile install --profile /nix/var/nix/profiles/default /opt/principle-graph#principle-graph --priority 3 \
+ && ln -sf /nix/var/nix/profiles/default/bin/pg /usr/local/bin/pg \
+ && ln -sf /nix/var/nix/profiles/default/bin/rg /usr/local/bin/rg
+USER sandbox
+WORKDIR /sandbox
