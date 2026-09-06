@@ -32,7 +32,8 @@ no-op under the default keep-first mode.
 
 | Property | Type | Required | Meaning |
 |---|---|---:|---|
-| `relation` | string | yes | Domain relation this row reports (self-describing). |
+| `relation` | string | yes | Domain relation this row reports, in canonical registry form (ADR-0003). Part of row identity. |
+| `raw_relation` | string | no | The verb exactly as extracted, before registry normalization (ADR-0003). Empty on rows written before ADR-0003. Excluded from identity. |
 | `source_ref` | string | yes | Source/chunk or page reference; part of row identity. |
 | `confidence` | float | yes | This extraction event's own confidence in `[0.0, 1.0]`. |
 | `evidence` | string | yes | Single supporting snippet — lists exist nowhere anymore. |
@@ -65,7 +66,14 @@ later contradicted.
 
 Every typed, directed relationship uses its domain relation as the Neo4j relationship type
 (for example, `:INCREASES`). Relationship types must be normalized to uppercase identifiers
-before Cypher is generated; values are not interpolated directly into queries.
+before Cypher is generated; values are not interpolated directly into queries. The relation
+vocabulary itself is no longer open: incoming relations are canonicalized at the write
+boundary against the versioned relation registry (`src/principle_graph/data/relation-registry.yaml`)
+— alias spellings collapse onto their canonical verb and inverse-pair spellings flip to the
+canonical direction (ADR-0003, which supersedes this document's earlier open-vocabulary
+wording). Unknown verbs pass through flagged and are consolidated by a registry edit plus a
+re-run of `pg normalize-relations`. The extracted verb is preserved on ledger rows as
+`raw_relation`.
 
 An Arrow carries current state only; history lives in the ledger above.
 

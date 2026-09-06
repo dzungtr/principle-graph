@@ -374,6 +374,27 @@ def backfill_sources_command(settings: Settings, out=sys.stdout) -> int:
     return 0
 
 
+def normalize_relations_command(settings: Settings, out=sys.stdout) -> int:
+    """Run the one-off relation normalization pass and print its report."""
+    try:
+        driver = _driver(settings)
+        try:
+            report = Neo4jGraphWriter(
+                driver, database=settings.database
+            ).normalize_relations()
+        finally:
+            driver.close()
+    except Exception as error:  # CLI should provide a useful failure without a traceback.
+        print(f"Relation normalization failed: {error}", file=sys.stderr)
+        return 1
+    print(
+        "Relation normalization complete: "
+        + ", ".join(f"{key}={value}" for key, value in report.items()),
+        file=out,
+    )
+    return 0
+
+
 def provenance_command(settings: Settings, source_id: str, out=sys.stdout) -> int:
     """Walk everything one source claimed, including later-contradicted rows."""
     try:
@@ -471,6 +492,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     provenance.set_defaults(
         handler=lambda: provenance_command(Settings.from_env(), args.source_id))
+    normalize = subparsers.add_parser(
+        "normalize-relations",
+        help="re-canonicalize ledger relations through the relation registry (ADR-0003)",
+        description=(
+            "One-off relation normalization pass (ADR-0003, PRD #76 slice 1): "
+            "every ledger row is re-canonicalized through the versioned "
+            "relation registry — alias spellings collapse onto their canonical "
+            "verb, inverse-pair spellings flip to the canonical direction, and "
+            "same-source verb variants collapse onto one row whose identity "
+            "uses the canonical verb. The extracted verb is preserved as the "
+            "row's raw_relation; unknown verbs pass through uncanonicalized "
+            "and are counted in the report. Idempotent: a second run computes "
+            "an empty plan and changes no state — timestamps included — so the "
+            "command is safe to repeat after registry edits."
+        ),
+    )
+    normalize.set_defaults(
+        handler=lambda: normalize_relations_command(Settings.from_env())
+    )
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()

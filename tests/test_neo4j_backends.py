@@ -414,6 +414,8 @@ def test_writer_refresh_mode_updates_the_matched_row_instead_of_merging():
         "source_ref": "doc:chunk-1", "confidence": 0.9,
         "evidence": "refined evidence", "scope_conditions": "new scope", "domain": "",
         "source_id": "doc",
+        # ADR-0003: the extracted verb rides along on every row write.
+        "raw_relation": "supports",
     }
     assert arrow[1]["aggregate_confidence"] == 0.9
     assert arrow[1]["scope_conditions"] == "new scope"

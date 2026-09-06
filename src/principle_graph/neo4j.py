@@ -2,13 +2,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .label_registry import LabelRegistry, default_registry_path, load_label_registry
 from .ledger import LedgerRow, plan_ledger_writes, resolve_repeat_mode, source_id_of
+from .normalization import plan_normalization
 from .reduction import GraphEdge, GraphEntity
 from .resolution import Entity, SimilarEntity
+
+logger = logging.getLogger(__name__)
 
 _RELATION = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
@@ -68,12 +73,45 @@ class Neo4jGraphWriter:
         database: str = "neo4j",
         rejected_log_path: str | Path = ".pg/rejected.jsonl",
         repeat_mode: str = "keep-first",
+        relation_registry: LabelRegistry | None = None,
     ) -> None:
         self.driver = driver
         self.database = database
         self.rejected_sink = RejectedRecordSink(rejected_log_path)
         # Invalid modes raise here, before any session opens (issue #59 AC 2).
         self.repeat_mode = resolve_repeat_mode(repeat_mode)
+        # Write-boundary normalization (ADR-0003): the registry loads once, at
+        # construction, so a malformed registry fails before any write.
+        self.relation_registry = (
+            relation_registry if relation_registry is not None
+            else load_label_registry(default_registry_path())
+        )
+        # Unknown verbs pass through flagged: warned once per distinct verb,
+        # counted per occurrence for the run summary (PRD #76).
+        self.unknown_relation_counts: dict[str, int] = {}
+        self._warned_unknown: set[str] = set()
+
+    def _canonicalize_for_write(
+        self, subject: str, relation: str, object_: str
+    ) -> tuple[str, str, str, str]:
+        """Registry canonicalization before any Cypher is generated (ADR-0003).
+
+        Returns the canonical triple plus the verb exactly as extracted.
+        Unknown verbs pass through unchanged and are flagged.
+        """
+        canon = self.relation_registry.canonicalize(subject, relation, object_)
+        if canon.unknown:
+            self.unknown_relation_counts[canon.raw_relation] = (
+                self.unknown_relation_counts.get(canon.raw_relation, 0) + 1
+            )
+            if canon.raw_relation not in self._warned_unknown:
+                self._warned_unknown.add(canon.raw_relation)
+                logger.warning(
+                    "unregistered relation %r passed through uncanonicalized; "
+                    "add it (or an alias) to the relation registry to consolidate it",
+                    canon.raw_relation,
+                )
+        return canon.subject, canon.relation, canon.object, canon.raw_relation
 
     def upsert_entity(self, entity: GraphEntity) -> None:
         query = (
@@ -94,7 +132,10 @@ class Neo4jGraphWriter:
             )
 
     def upsert_edge(self, edge: GraphEdge) -> None:
-        relation = _relation(edge.relation)
+        subject, relation, object_, _raw = self._canonicalize_for_write(
+            edge.subject, edge.relation, edge.object
+        )
+        relation = _relation(relation)
         query = (
             f"MATCH (s:Entity {{name: $subject}}), (o:Entity {{name: $object}}) "
             f"MERGE (s)-[r:{relation}]->(o) "
@@ -106,8 +147,8 @@ class Neo4jGraphWriter:
         with self.driver.session(database=self.database) as session:
             session.run(
                 query,
-                subject=edge.subject,
-                object=edge.object,
+                subject=subject,
+                object=object_,
                 confidence=edge.confidence,
                 evidence=list(edge.evidence),
                 scope_conditions=edge.scope_conditions,
@@ -129,6 +170,7 @@ class Neo4jGraphWriter:
         "(e:ExtractionEvent {relation: $relation, source_ref: $source_ref})-[:ABOUT]->(o) "
         "ON CREATE SET e.confidence = $confidence, e.evidence = $evidence, "
         "e.scope_conditions = $scope_conditions, e.domain = $domain, "
+        "e.raw_relation = $raw_relation, "
         "e.created_at = datetime(), e.updated_at = datetime() "
         "ON MATCH SET e.updated_at = datetime()"
     )
@@ -140,6 +182,7 @@ class Neo4jGraphWriter:
         "(o:Entity {name: $object}) "
         "SET e.confidence = $confidence, e.evidence = $evidence, "
         "e.scope_conditions = $scope_conditions, e.domain = $domain, "
+        "e.raw_relation = $raw_relation, "
         "e.updated_at = datetime()"
     )
     # Source provenance (issue #79, ADR-0004): appended to both row writes so new
@@ -166,6 +209,7 @@ class Neo4jGraphWriter:
             "evidence": row.evidence,
             "scope_conditions": row.scope_conditions,
             "domain": row.domain,
+            "raw_relation": row.raw_relation,
         }
         if row.source_ref:
             params["source_id"] = source_id_of(row.source_ref)
@@ -178,12 +222,18 @@ class Neo4jGraphWriter:
         The plan comes from the pure ledger module under this writer's repeat
         mode (keep-first default; refresh replaces matched rows); this adapter
         only executes it. The arrow's derived aggregate is recomputed from all
-        rows for the triple on every call — never set independently.
+        rows for the triple on every call — never set independently. The
+        relation is canonicalized through the registry before the plan is
+        built (ADR-0003); the extracted verb is preserved as ``raw_relation``.
         """
-        relation = _relation(edge.relation)
+        subject, relation, object_, raw_relation = self._canonicalize_for_write(
+            edge.subject, edge.relation, edge.object
+        )
+        relation = _relation(relation)
         candidate = LedgerRow(
-            edge.subject, relation, edge.object, edge.source_ref, edge.confidence,
+            subject, relation, object_, edge.source_ref, edge.confidence,
             edge.evidence[0] if edge.evidence else "", edge.scope_conditions,
+            raw_relation=raw_relation,
         )
         with self.driver.session(database=self.database) as session:
             existing = [
@@ -474,6 +524,106 @@ class Neo4jGraphWriter:
                     self._PROVENANCE_WALK_QUERY, source_id=source_id
                 )
             ]
+
+    # --- relation normalization pass (issue #77, ADR-0003) -----------------
+    _NORMALIZE_ROWS_LOAD_QUERY = (
+        "MATCH (s:Entity)-[:REPORTED]->(e:ExtractionEvent)-[:ABOUT]->(o:Entity) "
+        "RETURN s.name AS subject, e.relation AS relation, o.name AS object, "
+        "e.source_ref AS source_ref, e.confidence AS confidence, "
+        "e.evidence AS evidence, e.scope_conditions AS scope_conditions, "
+        "e.raw_relation AS raw_relation "
+        "ORDER BY e.created_at"
+    )
+    _NORMALIZE_ROW_DELETE_QUERY = (
+        "MATCH (s:Entity {name: $subject})-[:REPORTED]->"
+        "(e:ExtractionEvent {relation: $relation, source_ref: $source_ref})-[:ABOUT]->"
+        "(o:Entity {name: $object}) "
+        "DETACH DELETE e"
+    )
+    _NORMALIZE_ARROW_DELETE_QUERY = (
+        "MATCH (s:Entity {{name: $subject}})-[r:{relation}]->(o:Entity {{name: $object}}) "
+        "DELETE r"
+    )
+    # Recomputed target arrows reuse the ledger write shape: the MERGE creates
+    # the arrow when the flipped triple has no arrow yet, and the CASE guard
+    # keeps an existing arrow's scope unless the rewrite carries one.
+    _NORMALIZE_ARROW_UPDATE_QUERY = (
+        "MATCH (s:Entity {{name: $subject}}), (o:Entity {{name: $object}}) "
+        "MERGE (s)-[r:{relation}]->(o) "
+        "ON CREATE SET r.created_at = datetime() "
+        "SET r.confidence = $aggregate_confidence, "
+        "r.scope_conditions = CASE WHEN $scope_conditions = '' "
+        "THEN r.scope_conditions ELSE $scope_conditions END, "
+        "r.updated_at = datetime()"
+    )
+
+    def normalize_relations(self) -> dict[str, int]:
+        """Re-canonicalize the existing ledger through the registry (ADR-0003).
+
+        The plan is computed over the current rows and executed in one pass:
+        rewritten rows move to their canonical identity (inverse flips move the
+        row to the flipped triple), same-source verb variants collapse onto one
+        row, emptied arrows are deleted, and target arrows recompute their
+        aggregate from the final row set. Rows already canonical or carrying
+        unknown verbs are left untouched, so a second run is an empty plan —
+        full state no-op, timestamps included.
+        """
+        with self.driver.session(database=self.database) as session:
+            existing = [
+                LedgerRow(
+                    record["subject"], _relation(record["relation"]),
+                    record["object"], record["source_ref"] or "",
+                    float(record["confidence"] or 0.0),
+                    record["evidence"] or "", record["scope_conditions"] or "",
+                    record["domain"] or "",
+                    raw_relation=record["raw_relation"] or "",
+                )
+                for record in session.run(self._NORMALIZE_ROWS_LOAD_QUERY)
+            ]
+            plan = plan_normalization(existing, self.relation_registry)
+            for identity in plan.rows_to_delete:
+                session.run(
+                    self._NORMALIZE_ROW_DELETE_QUERY,
+                    subject=identity[0], relation=identity[1],
+                    source_ref=identity[3], object=identity[2],
+                ).consume()
+            for row in plan.rows_to_create:
+                # _write_row re-links FROM_SOURCE so provenance coverage stays
+                # total when a row moves to its canonical identity (#85 seam).
+                self._write_row(session, self._ROW_MERGE_QUERY, row)
+            for triple in plan.arrows_to_delete:
+                session.run(
+                    self._NORMALIZE_ARROW_DELETE_QUERY.format(relation=triple[1]),
+                    subject=triple[0], object=triple[2],
+                ).consume()
+            arrows_recomputed = 0
+            for update in plan.arrow_updates:
+                record = session.run(
+                    self._BACKFILL_ARROW_CONFIDENCE_QUERY.format(relation=update.relation),
+                    subject=update.subject,
+                    object=update.object,
+                ).single()
+                current = record["confidence"] if record is not None else None
+                if (current is not None
+                        and abs(float(current) - update.aggregate_confidence)
+                        <= self._AGGREGATE_EPSILON):
+                    continue
+                session.run(
+                    self._NORMALIZE_ARROW_UPDATE_QUERY.format(relation=update.relation),
+                    subject=update.subject,
+                    object=update.object,
+                    aggregate_confidence=update.aggregate_confidence,
+                    scope_conditions=update.scope_conditions,
+                ).consume()
+                arrows_recomputed += 1
+            return {
+                "rows_seen": len(existing),
+                "rows_created": len(plan.rows_to_create),
+                "rows_deleted": len(plan.rows_to_delete),
+                "arrows_deleted": len(plan.arrows_to_delete),
+                "arrows_recomputed": arrows_recomputed,
+                "unknown_flagged": len(plan.unknown_flagged),
+            }
 
     def get_edge(self, subject: str, relation: str, object_: str) -> GraphEdge | None:
         relation = _relation(relation)
