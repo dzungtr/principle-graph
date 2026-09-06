@@ -1,0 +1,11 @@
+.git
+.worktrees
+__pycache__
+*.pyc
+.venv
+.pg
+assets
+lessons
+reference
+learning-records
+demo
