@@ -33,4 +33,4 @@ Promoted from PRD #57 Results (initiative closed 2026-08-30; slices merged as PR
 - **Suite growth over the initiative:** 103 → 181 tests, all database-free; ledger policy core isolated in a pure module (`src/principle_graph/ledger.py`), write path pinned by recording-fake and stateful plan-driven fakes.
 - **Seed-score wobble learning:** seed scores wobble ≤2e-4 across embedder runs on the same graph. Future pre/post baselines should compare seed names + order and per-rank directions, not raw seed scores.
 
-These numbers are the migration evidence for the two-layer decision: history became representable without moving current state, and the read-path contract survived the split unchanged. Known deferred hardening is filed as follow-ups #70 (per-relation migration guard) and #72 (multi-item legacy evidence seeding).
+These numbers are the migration evidence for the two-layer decision: history became representable without moving current state, and the read-path contract survived the split unchanged. The follow-up hardening filed as #70 (per-relation migration guard) and #72 (multi-item legacy evidence seeding) has since landed in PRs #81 and #83.
