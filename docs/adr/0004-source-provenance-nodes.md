@@ -28,4 +28,4 @@ Decision: add one **`:Source` node per source id** — the `source_ref` prefix b
 
 - :Source node inventory (ids, row coverage): **pending demo-graph measurement** — the mechanism is covered by `tests/test_source_provenance.py` (prefix extraction, node/edge creation, no-op re-run) and ingest writes `FROM_SOURCE` on both write paths (PR #85); the demo source was removed from the repo (#50), so the rebuilt demo graph's inventory must be measured at the next demo run.
 - Backfill scale / second-run no-op evidence: no-op idempotency proven in `tests/test_source_provenance.py` (`pg backfill-sources` twice changes no state); scale pending demo-graph measurement.
-- Suite: 181 → 209 at this slice's merge (PR #85).
+- Suite: 182 → 210 at this slice's merge (PR #85, e21d1bb).

@@ -29,4 +29,4 @@ The fact-check orchestrator is a pure pipeline over fetched ledger rows with the
 (filled at initiative close, PRD #76 Results)
 
 - Fact-check verdict volume + accuracy spot-check: **pending demo-graph measurement** — the pipeline is fully covered by fake-searcher/fake-verdict-LLM tests (`tests/test_factcheck.py`, database- and network-free; PR #89), but no live fact-check run has occurred: it needs a populated multi-source graph plus the web-search and verdict-LLM services.
-- Suite: 181 → 304 at this slice's merge (PR #89; 181 → 209 slice 3, → 234 slice 1, → 281 slice 2).
+- Suite: 182 → 304 at this slice's merge (PR #89, d22c6f6; 182 → 210 slice 3 #85, → 265 slice 1 #86, → 281 slice 2 #87).
