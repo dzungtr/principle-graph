@@ -297,7 +297,11 @@ class Neo4jGraphWriter:
                     record["subject"], _relation(record["relation"]),
                     record["object"], record["source_ref"] or "",
                     float(confidence),
-                    evidence[0] if evidence else "",  # row shape: one evidence string
+                    # Row shape is a single evidence string (PRD #57); legacy
+                    # pre-#58 arrows may carry a list, so the items are joined
+                    # at seed time rather than truncated to the first (issue
+                    # #72) — the join round-trips through the provenance read.
+                    "\n".join(evidence),
                     record["scope_conditions"] or "",
                 ))
             existing = [

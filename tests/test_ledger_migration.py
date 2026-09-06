@@ -14,7 +14,7 @@ from contextlib import redirect_stdout
 import pytest
 
 from principle_graph.cli import main, migrate_ledger_command
-from principle_graph.neo4j import Neo4jGraphWriter
+from principle_graph.neo4j import Neo4jGraphWriter, assemble_provenance
 from principle_graph.reduction import GraphEdge
 
 
@@ -236,13 +236,39 @@ def test_migration_creates_one_row_per_edge_with_ingest_row_shape():
     assert row["scope_conditions"] == "when audited"
 
 
-def test_arrow_confidences_are_unchanged_and_multi_evidence_seeds_first_item():
+def test_arrow_confidences_are_unchanged_during_backfill():
     driver = _legacy_driver()
     before = {k: v["confidence"] for k, v in driver.arrows.items()}
     _writer(driver).migrate_ledger()
     after = {k: v["confidence"] for k, v in driver.arrows.items()}
     assert after == before  # single-row aggregate equals prior confidence
     assert driver.arrows[("gamma", "MAY_DESCRIBE", "alpha")]["updated_at"] == "t6"
+
+
+def test_backfill_joins_multi_item_legacy_evidence_and_round_trips_it():
+    """Issue #72: legacy pre-#58 edges may carry multi-item evidence lists;
+    the row's single evidence string must preserve every item (joined at
+    seed time), not truncate to the first."""
+    driver = _FakeDriver()
+    driver.add_arrow("alpha", "supports", "beta", 0.9,
+                     ["first observation", "second observation"],
+                     source_ref="doc:chunk-9")
+    writer = _writer(driver)
+    report = writer.migrate_ledger()
+
+    assert report["rows_created"] == 1
+    row = driver.rows[("alpha", "SUPPORTS", "beta", "doc:chunk-9")]
+    assert row["evidence"] == "first observation\nsecond observation"
+
+    # Round-trip through the provenance join shared by every read path.
+    source_ref, evidence = assemble_provenance(
+        ["doc:chunk-9"], [row["evidence"]], None, None)
+    assert source_ref == "doc:chunk-9"
+    assert evidence == ("first observation\nsecond observation",)
+    assert "first observation" in evidence[0] and "second observation" in evidence[0]
+    edge = writer.get_edge("alpha", "supports", "beta")
+    assert edge is not None and edge.source_ref == "doc:chunk-9"
+    assert edge.evidence == ("first observation\nsecond observation",)
 
 
 def test_migration_strips_legacy_provenance_but_keeps_scope_and_timestamps():
