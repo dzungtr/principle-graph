@@ -32,4 +32,8 @@ The same registry loader pattern (generic label registry) is reused by the domai
 
 ## Measured results
 
-(filled at initiative close)
+(filled at initiative close, PRD #76 Results)
+
+- Suite growth: **182 → 265 passing** at this slice's merge (PR #86, 4a2de74: +55 registry/normalization/orchestrator tests, database-free).
+- Registry consolidation loop: exercised end-to-end by `tests/test_normalization_pass.py` (unknowns flagged, aliases added, re-run idempotent, raw_relation preserved, same-source verb variants collapse to one row).
+- Migration scale / distinct-type reduction: **pending demo-graph measurement** — the demo source was removed from the repo (#50) and the extraction gateway is unavailable in this environment; re-run `pg migrate-ledger` + `pg normalize-relations` against a rebuilt demo graph to pin the distinct-type count.

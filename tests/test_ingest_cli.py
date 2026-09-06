@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from principle_graph.review import GraphDelta, ReviewResult
+
 from principle_graph.cli import (
     PreflightError,
     ingest_command,
@@ -202,6 +204,10 @@ class _FakeStats:
 class _FakeResult:
     def __init__(self, verdict: str) -> None:
         self.stats = _FakeStats(verdict)
+        # Issue #80 trigger surfacing reads the review-approved delta; empty here.
+        self.delta = GraphDelta()
+        self.review = ReviewResult(approved=GraphDelta(), rejected=[])
+        self.graph = None  # no writer; the trigger notice is skipped
 
 
 class _FakeOrchestrator:
@@ -490,3 +496,93 @@ def test_ingest_help_documents_repeat_mode_and_precedence():
     assert "--repeat-mode" in text
     assert "keep-first" in text and "refresh" in text
     assert "PG_REPEAT_MODE" in text  # precedence documented in the help itself
+
+
+# ---------------------------------------------------------------------------
+# Decide-mode notice derives from review.approved (PR #89 review P2)
+# ---------------------------------------------------------------------------
+
+
+def _ingest_result(delta, approved, verdict="approved"):
+    from principle_graph.orchestrator import IngestResult, IngestStats
+    from principle_graph.review import GraphDelta, ReviewResult
+
+    stats = IngestStats(
+        source="demo.md", chunks_sequential=[], extraction_requests=0,
+        embedding_requests=0, ambiguity_queued=0, ambiguity_notes=(),
+        verdict=verdict, committed_entities=0, committed_edges=0,
+        rejected_count=0, rejected_log_path="", elapsed_seconds=0.0,
+    )
+    return IngestResult(stats=stats, delta=delta,
+                        review=ReviewResult(approved=approved, rejected=[]),
+                        graph=None)
+
+
+def _edge(domain):
+    from principle_graph.review import GraphEdge
+    return GraphEdge(subject="S", relation="CAUSES", object="O",
+                     confidence=0.7, source_ref="book-1:ch-1", domain=domain)
+
+
+def test_ingest_notice_uses_approved_edges_not_pre_review_delta(monkeypatch, tmp_path):
+    """A rejected ingest must not advertise fact-check candidates that were
+    never committed: domains derive from review.approved, not result.delta."""
+    from principle_graph import cli
+
+    rejected_delta = GraphDelta(new_edges=[_edge("economics")])
+    approved_empty = GraphDelta()
+    result = _ingest_result(rejected_delta, approved_empty, verdict="rejected")
+
+    class _FakeOrchestrator:
+        def run(self, _path, input_fn=None):
+            return result
+
+    monkeypatch.setattr(cli, "preflight", lambda _s: None)
+    monkeypatch.setattr(
+        cli, "build_orchestrator",
+        lambda _s, repeat_mode=None: (_FakeOrchestrator(), _FakeWriter()))
+    settings = _settings()
+    source = tmp_path / "demo.md"
+    source.write_text("# Demo\n\nbody", encoding="utf-8")
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = cli.ingest_command(settings, str(source), yes=True, out=out)
+    assert code == 4  # rejected
+    assert "Fact-check candidates" not in out.getvalue()
+
+
+def test_ingest_notice_fires_for_approved_domain_rows(monkeypatch, tmp_path):
+    """Approved rows in a domain with pre-existing rows from another source
+    surface the fact-check advisory exactly once per ingest."""
+    from principle_graph import cli
+    from principle_graph.factcheck import LedgerRow
+
+    approved = GraphDelta(new_edges=[_edge("economics")])
+    result = _ingest_result(approved, approved)
+
+    class _Graph:
+        def rows_for_domain(self, _domain):
+            return [LedgerRow("T", "CAUSES", "U", "book-2:ch-1", 0.6,
+                              "", "", "economics"),
+                    LedgerRow("V", "CAUSES", "W", "book-3:ch-1", 0.6,
+                              "", "", "economics")]
+
+    # Rebuild the result against the writer seam the notice reads.
+    result = type(result)(stats=result.stats, delta=result.delta,
+                          review=result.review, graph=_Graph())
+
+    class _Orch:
+        def run(self, _path, input_fn=None):
+            return result
+
+    monkeypatch.setattr(cli, "preflight", lambda _s: None)
+    monkeypatch.setattr(
+        cli, "build_orchestrator", lambda _s, repeat_mode=None: (_Orch(), _FakeWriter()))
+    settings = _settings()
+    source = tmp_path / "demo.md"
+    source.write_text("# Demo\n\nbody", encoding="utf-8")
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = cli.ingest_command(settings, str(source), yes=True, out=out)
+    assert code == 0
+    assert "Fact-check candidates" in out.getvalue()
