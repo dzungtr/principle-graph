@@ -5,7 +5,7 @@ FROM pi-workspace-osh-v2:openrouter
 USER root
 COPY . /opt/principle-graph
 RUN mkdir -p /etc/nix && printf 'experimental-features = nix-command flakes\nsandbox = false\nbuild-users-group =\n' >> /etc/nix/nix.conf \
- && nix profile install /opt/principle-graph#principle-graph --priority 3 \
+ && nix profile install --profile /nix/var/nix/profiles/default /opt/principle-graph#principle-graph --priority 3 \
  && ln -sf /nix/var/nix/profiles/default/bin/pg /usr/local/bin/pg
 USER sandbox
 WORKDIR /sandbox
