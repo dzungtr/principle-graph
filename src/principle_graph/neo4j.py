@@ -212,10 +212,15 @@ class Neo4jGraphWriter:
                 )
 
     # --- backfill migration (issue #60) -----------------------------------
+    # The EXISTS patterns are pinned to the arrow's own relation (issue #70):
+    # a pair may carry several relation types, and a crash between batches can
+    # leave one migrated and its sibling not — matching on the (subject, object)
+    # pair alone would then skip the un-migrated arrow and strip its legacy
+    # provenance before any ledger row exists for it.
     _BACKFILL_LOAD_QUERY = (
         "MATCH (s:Entity)-[r]->(o:Entity) "
         "WHERE type(r) <> 'REPORTED' "
-        "AND NOT EXISTS { (s)-[:REPORTED]->(:ExtractionEvent)-[:ABOUT]->(o) } "
+        "AND NOT EXISTS { (s)-[:REPORTED]->(:ExtractionEvent {relation: type(r)})-[:ABOUT]->(o) } "
         "RETURN s.name AS subject, type(r) AS relation, o.name AS object, "
         "r.confidence AS confidence, r.evidence AS evidence, "
         "r.scope_conditions AS scope_conditions, r.source_ref AS source_ref"
@@ -249,7 +254,7 @@ class Neo4jGraphWriter:
     )
     _BACKFILL_STRIP_CLAUSE = (
         "WHERE type(r) <> 'REPORTED' "
-        "AND EXISTS { (s)-[:REPORTED]->(:ExtractionEvent)-[:ABOUT]->(o) } "
+        "AND EXISTS { (s)-[:REPORTED]->(:ExtractionEvent {relation: type(r)})-[:ABOUT]->(o) } "
         "AND (r.evidence IS NOT NULL OR r.source_ref IS NOT NULL)"
     )
     _BACKFILL_STRIP_COUNT_QUERY = (

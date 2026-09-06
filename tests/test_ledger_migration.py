@@ -77,11 +77,17 @@ class _FakeSession:
                 row_evidence=[row["evidence"] for _identity, row in rows_for],
             )])
         if "RETURN count(r) AS count" in query:  # strip-count read
-            n = sum(1 for arrow in g.arrows.values() if self._strip_due(arrow))
+            n = sum(1 for key, arrow in g.arrows.items()
+                    if self._strip_due(key, arrow, g, self._strip_per_relation(query)))
             return _Result([_Record(count=n)])
         if "RETURN s.name AS subject, type(r) AS relation" in query:
+            per_relation = "{relation: type(r)}" in query  # issue #70 guard pin
             def _has_rows(key):
-                return any(identity[:3] == key for identity in g.rows)
+                if per_relation:  # EXISTS matches the arrow's own relation only
+                    return any(identity[:3] == key for identity in g.rows)
+                return any(  # un-pinned EXISTS matches the (subject, object) pair
+                    identity[0] == key[0] and identity[2] == key[2]
+                    for identity in g.rows)
             if "NOT EXISTS" in query:  # candidate load: un-migrated arrows only
                 items = [(k, a) for k, a in g.arrows.items() if not _has_rows(k)]
             else:
@@ -131,8 +137,9 @@ class _FakeSession:
             arrow["updated_at"] = g.tick()
             return _Result([])
         if "REMOVE r.evidence, r.source_ref" in query:  # legacy provenance strip
-            for arrow in g.arrows.values():
-                if self._strip_due(arrow):
+            per_relation = self._strip_per_relation(query)
+            for key, arrow in g.arrows.items():
+                if self._strip_due(key, arrow, g, per_relation):
                     arrow.pop("evidence", None)
                     arrow.pop("source_ref", None)
             return _Result([])
@@ -146,8 +153,19 @@ class _FakeSession:
         return label.split("{")[0]
 
     @staticmethod
-    def _strip_due(arrow) -> bool:
-        return arrow.get("evidence") is not None or arrow.get("source_ref") is not None
+    def _strip_per_relation(query: str) -> bool:
+        """Issue #70: the strip EXISTS is pinned to the arrow's relation."""
+        return "{relation: type(r)}" in query
+
+    @staticmethod
+    def _strip_due(key, arrow, g, per_relation) -> bool:
+        if arrow.get("evidence") is None and arrow.get("source_ref") is None:
+            return False
+        if per_relation:  # a ledger row for this arrow's own relation exists
+            return any(identity[:3] == key for identity in g.rows)
+        return any(  # un-pinned: any row on the (subject, object) pair
+            identity[0] == key[0] and identity[2] == key[2]
+            for identity in g.rows)
 
 
 class _FakeDriver:
@@ -286,17 +304,36 @@ def test_migration_requires_confident_edges():
         _writer(driver).migrate_ledger()
 
 
-def test_row_merge_has_no_on_match_side_effects():
-    from principle_graph.neo4j import Neo4jGraphWriter as W
-    assert "ON CREATE SET" in W._BACKFILL_ROW_MERGE_QUERY
-    assert "ON MATCH" not in W._BACKFILL_ROW_MERGE_QUERY
-    assert "MERGE (s)-[:REPORTED]->" in W._BACKFILL_ROW_MERGE_QUERY
-    assert "REMOVE r.evidence, r.source_ref" in W._BACKFILL_STRIP_QUERY
-    assert "type(r) <> 'REPORTED'" in W._BACKFILL_LOAD_QUERY
-    # The strip removes provenance properties, so re-deriving candidates from
-    # arrow properties would fabricate new identities on rerun — the load must
-    # only select arrows that have no ledger rows yet.
-    assert "NOT EXISTS" in W._BACKFILL_LOAD_QUERY
+def test_guard_and_strip_are_per_relation_not_per_pair():
+    """Issue #70: a (subject, object) pair may carry several relation types,
+    and a crash between batches can leave one migrated while its sibling is
+    not. The guard and strip must match the arrow's own relation, or the
+    un-migrated sibling is skipped and silently loses its provenance."""
+    driver = _FakeDriver()
+    driver.add_arrow("alpha", "supports", "beta", 0.9, ["older reading"],
+                     source_ref="doc:old")
+    driver.add_arrow("alpha", "contradicts", "beta", 0.7, ["newer reading"],
+                     source_ref="doc:new")
+    writer = _writer(driver)
+    writer.migrate_ledger()
+    # Simulate the crash-between-batches state: drop one relation's rows and
+    # restore its legacy provenance so the pair is mixed migrated/un-migrated.
+    for identity in [k for k in driver.rows if k[1] == "CONTRADICTS"]:
+        del driver.rows[identity]
+    arrow = driver.arrows[("alpha", "CONTRADICTS", "beta")]
+    arrow["evidence"] = ["newer reading"]
+    arrow["source_ref"] = "doc:new"
+
+    report = writer.migrate_ledger()
+
+    assert report["edges_seen"] == 1  # only the un-migrated relation is a candidate
+    assert report["rows_created"] == 1
+    row = driver.rows[("alpha", "CONTRADICTS", "beta", "doc:new")]
+    assert row["evidence"] == "newer reading"  # provenance reached the ledger
+    assert driver.rows[("alpha", "SUPPORTS", "beta", "doc:old")]["evidence"] == "older reading"
+    assert "evidence" not in driver.arrows[("alpha", "SUPPORTS", "beta")]
+    assert "evidence" not in arrow  # stripped only after its own row existed
+    assert "source_ref" not in arrow
 
 
 def test_cli_help_documents_behavior_and_idempotency(capsys):
