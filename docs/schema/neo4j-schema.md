@@ -43,9 +43,12 @@ no-op under the default keep-first mode.
 
 ## Relationships (Arrows)
 
-Every typed, directed relationship uses its domain relation as the Neo4j relationship type
-(for example, `:INCREASES`). Relationship types must be normalized to uppercase identifiers
-before Cypher is generated; values are not interpolated directly into queries.
+Every typed, directed relationship uses its **canonical** relation (ADR-0003,
+`relation-registry.yaml`) as the Neo4j relationship type (for example, `:INCREASES`).
+Aliases and inverse directions collapse into the canonical form at the write boundary;
+the extractor's original verb is preserved as the ledger row's `raw_relation`. Unknown
+labels pass through flagged for registry consolidation. Types are normalized to uppercase
+identifiers before Cypher is generated; values are not interpolated directly into queries.
 
 An Arrow carries current state only; history lives in the ledger above.
 
