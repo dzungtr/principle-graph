@@ -1,0 +1,44 @@
+# Relation registry (ADR-0003): canonical verbs for the write boundary.
+#
+# Deterministic alias + inverse-pair normalization applied by Neo4jGraphWriter
+# before any Cypher is generated. The LLM's original verb is preserved on the
+# ledger row as `raw_relation`; unknown verbs pass through flagged, never
+# rejected. Consolidating overflow types is an edit here plus a re-run of
+# `pg normalize-relations` — no code change.
+#
+# Rules:
+# - keys and aliases are lowercase snake_case (extraction-contract label shape);
+# - `inverse` marks the canonical direction of a pair: declare it on exactly
+#   one member; edges spelled with the other member flip to the declarer;
+# - unknown verbs are not listed here — they pass through as-is.
+version: 1
+labels:
+  increases:
+    aliases: [raises]
+    inverse: reduces
+    description: Subject pushes the object quantity up.
+  reduces:
+    aliases: [eases, lowers]
+    description: Subject pushes the object quantity down.
+  supersedes:
+    aliases: [replaces]
+    inverse: superseded_by
+    description: A later claim displaces the earlier one.
+  superseded_by:
+    description: This claim was displaced by the object claim; collapses to supersedes.
+  supports:
+    aliases: [backs, corroborates]
+    description: Evidence or reasoning backs the object claim.
+  contradicts:
+    aliases: [refutes]
+    inverse: contradicted_by
+    description: Subject asserts the object claim is false or holds only narrowly.
+  contradicted_by:
+    description: This claim is contradicted by the object claim; collapses to contradicts.
+  part_of:
+    inverse: has_part
+    description: Subject is a component of the object whole.
+  has_part:
+    description: Whole contains the subject as a part; collapses to part_of.
+  depends_on:
+    description: Subject requires the object to hold or function.

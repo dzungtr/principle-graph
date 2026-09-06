@@ -58,6 +58,10 @@ class IngestStats:
     rejected_count: int
     rejected_log_path: str
     elapsed_seconds: float
+    # ADR-0003: unknown verbs passed through at the write boundary, per-verb
+    # occurrence counts from the writer's boundary flag; empty when all verbs
+    # canonicalized or the writer does not track them.
+    unknown_relations: tuple[tuple[str, int], ...] = ()
 
     def render(self) -> str:
         committed_lines = [
@@ -78,8 +82,15 @@ class IngestStats:
             f"Mode-2 review: {self.verdict}",
             f"commit result: {self.committed_entities} entities, {self.committed_edges} edges committed",
             f"rejected items: {self.rejected_count} (log: {self.rejected_log_path})",
-            f"elapsed seconds: {self.elapsed_seconds:.3f}",
         ])
+        if self.unknown_relations:
+            unknown = ", ".join(
+                f"{verb}={count}" for verb, count in self.unknown_relations)
+            committed_lines.append(
+                f"unknown relations passed through uncanonicalized: {unknown}")
+        committed_lines.append(
+            f"elapsed seconds: {self.elapsed_seconds:.3f}",
+        )
         return "\n".join(committed_lines)
 
 
@@ -165,6 +176,9 @@ class IngestOrchestrator:
             rejected_count=len(review.rejected),
             rejected_log_path=str(self.rejected_log_path),
             elapsed_seconds=monotonic() - started,
+            unknown_relations=tuple(
+                sorted(getattr(self.writer, "unknown_relation_counts", {}).items())
+            ),
         )
         return IngestResult(stats=stats, delta=delta, review=review, graph=self.writer)
 

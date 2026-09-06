@@ -45,6 +45,9 @@ class LedgerRow:
     evidence: str
     scope_conditions: str = ""
     domain: str = ""
+    # The verb exactly as extracted, before registry normalization (ADR-0003).
+    # Excluded from identity: same-source verb variants collapse to one row.
+    raw_relation: str = ""
 
     def __post_init__(self) -> None:
         if not 0.0 <= float(self.confidence) <= 1.0:
