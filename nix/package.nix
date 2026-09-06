@@ -34,7 +34,11 @@ python312Packages.buildPythonApplication rec {
   pyproject = true;
   src = ./..;
   build-system = [ python312Packages.setuptools ];
-  dependencies = [ neo4j python312Packages.pymupdf ];
+  dependencies = [
+    neo4j
+    python312Packages.pymupdf
+    python312Packages.pyyaml
+  ];
   pythonImportsCheck = [ "principle_graph" ];
   meta = {
     description = "Local knowledge graph memory prototype";
