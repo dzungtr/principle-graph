@@ -154,7 +154,7 @@ class _FakeSession:
                 _Record(subject=s, relation=rel, object=o, source_ref=src,
                         confidence=row["confidence"], evidence=row["evidence"],
                         scope_conditions=row["scope_conditions"],
-                        raw_relation=row["raw_relation"])
+                        domain=row["domain"], raw_relation=row["raw_relation"])
                 for (s, rel, o, src), row in sorted(g.rows.items(), key=lambda kv: kv[1]["created_at"])
             ])
         if "ExtractionEvent {relation: $relation}" in query:  # triple row load

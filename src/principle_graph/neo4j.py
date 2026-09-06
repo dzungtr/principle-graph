@@ -531,7 +531,7 @@ class Neo4jGraphWriter:
         "RETURN s.name AS subject, e.relation AS relation, o.name AS object, "
         "e.source_ref AS source_ref, e.confidence AS confidence, "
         "e.evidence AS evidence, e.scope_conditions AS scope_conditions, "
-        "e.raw_relation AS raw_relation "
+        "e.domain AS domain, e.raw_relation AS raw_relation "
         "ORDER BY e.created_at"
     )
     _NORMALIZE_ROW_DELETE_QUERY = (

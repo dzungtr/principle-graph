@@ -372,3 +372,24 @@ def test_ambiguity_note_formatter_lists_ranked_matches():
     assert "Alpha (0.92 via embedding)" in note
     assert "Alfa (0.88 via embedding)" in note
     assert "create-new" in note
+
+def test_stats_block_reports_unknown_relations_from_writer():
+    """ADR-0003: the ingest run summary surfaces the writer's unknown-verb flag."""
+    graph = InMemoryGraph()
+    orch, _, path = _orchestrator(graph)
+    # Any object with an unknown_relation_counts attribute stands in for the
+    # writer seam; counts come straight from the boundary flag.
+    graph.unknown_relation_counts = {"WIDGET_BOOSTS": 2, "FROBS": 1}
+    result = orch.run(path, input_fn=lambda _: "approve")
+    transcript = result.stats.render()
+    assert result.stats.unknown_relations == (("FROBS", 1), ("WIDGET_BOOSTS", 2))
+    assert ("unknown relations passed through uncanonicalized: "
+            "FROBS=1, WIDGET_BOOSTS=2") in transcript
+
+
+def test_stats_block_omits_unknown_line_when_no_unknowns():
+    graph = InMemoryGraph()
+    orch, _, path = _orchestrator(graph)
+    result = orch.run(path, input_fn=lambda _: "approve")
+    assert result.stats.unknown_relations == ()
+    assert "unknown relations" not in result.stats.render()
