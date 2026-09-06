@@ -35,6 +35,22 @@ class SchemaArtifactTests(unittest.TestCase):
             ),
         )
 
+    def test_ddl_defines_source_id_index(self):
+        self.assertRegex(
+            DDL,
+            re.compile(
+                r"CREATE RANGE INDEX source_id IF NOT EXISTS\s+"
+                r"FOR \(source:Source\)\s+ON \(source\.id\)",
+                re.DOTALL,
+            ),
+        )
+
+    def test_spec_defines_the_source_node_and_from_source_link(self):
+        self.assertIn("### `Source`", SPEC)
+        self.assertIn("FROM_SOURCE", SPEC)
+        for property_name in ("id", "first_seen"):
+            self.assertIn(f"`{property_name}`", SPEC)
+
     def test_spec_defines_the_two_layer_model(self):
         self.assertIn("### `ExtractionEvent`", SPEC)
         self.assertIn("REPORTED", SPEC)

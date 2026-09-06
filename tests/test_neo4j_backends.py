@@ -250,7 +250,7 @@ def test_structural_corroboration_rejects_non_uppercase_relation():
 def test_upsert_extraction_loads_existing_rows_for_the_triple():
     driver = RecordingDriver()
     writer = Neo4jGraphWriter(driver)
-    writer.upsert_extraction(GraphEdge("a", "supports", "b", 0.5, "s1", ("witness",), ""))
+    writer.upsert_extraction(GraphEdge("a", "supports", "b", 0.5, "s1:c1", ("witness",), ""))
     (session,) = driver.sessions
     load_query, load_params = session.queries[0]
     assert ("MATCH (s:Entity {name: $subject})-[:REPORTED]->"
@@ -283,11 +283,11 @@ def test_upsert_extraction_merges_row_on_identity_with_single_string_evidence():
 
 
 def test_upsert_extraction_never_overwrites_a_matched_row():
-    existing = {"source_ref": "s1", "confidence": 0.6, "evidence": "first",
+    existing = {"source_ref": "s1:c1", "confidence": 0.6, "evidence": "first",
                 "scope_conditions": "old"}
     driver = RecordingDriver(rows=[dict(existing)])
     writer = Neo4jGraphWriter(driver)
-    writer.upsert_extraction(GraphEdge("a", "supports", "b", 0.9, "s1", ("second",), "new"))
+    writer.upsert_extraction(GraphEdge("a", "supports", "b", 0.9, "s1:c1", ("second",), "new"))
     (session,) = driver.sessions
     queries = [query for query, _ in session.queries]
     assert not any("MERGE (s)-[:REPORTED]" in query for query in queries)
@@ -297,10 +297,10 @@ def test_upsert_extraction_never_overwrites_a_matched_row():
 
 
 def test_upsert_extraction_recomputes_arrow_from_all_rows():
-    driver = RecordingDriver(rows=[{"source_ref": "s1", "confidence": 0.6,
+    driver = RecordingDriver(rows=[{"source_ref": "s1:c1", "confidence": 0.6,
                                     "evidence": "first", "scope_conditions": ""}])
     writer = Neo4jGraphWriter(driver)
-    writer.upsert_extraction(GraphEdge("a", "supports", "b", 0.5, "s2", ("second",), ""))
+    writer.upsert_extraction(GraphEdge("a", "supports", "b", 0.5, "s2:c2", ("second",), ""))
     (session,) = driver.sessions
     recompute_query, recompute_params = session.queries[-1]
     assert "MERGE (s)-[r:SUPPORTS]->(o)" in recompute_query
@@ -413,6 +413,7 @@ def test_writer_refresh_mode_updates_the_matched_row_instead_of_merging():
         "subject": "a", "object": "b", "relation": "SUPPORTS",
         "source_ref": "doc:chunk-1", "confidence": 0.9,
         "evidence": "refined evidence", "scope_conditions": "new scope", "domain": "",
+        "source_id": "doc",
     }
     assert arrow[1]["aggregate_confidence"] == 0.9
     assert arrow[1]["scope_conditions"] == "new scope"

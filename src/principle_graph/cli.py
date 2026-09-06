@@ -355,6 +355,47 @@ def migrate_ledger_command(settings: Settings, out=sys.stdout) -> int:
     return 0
 
 
+def backfill_sources_command(settings: Settings, out=sys.stdout) -> int:
+    """Create :Source nodes and FROM_SOURCE edges for existing ledger rows."""
+    try:
+        driver = _driver(settings)
+        try:
+            report = Neo4jGraphWriter(driver, database=settings.database).backfill_sources()
+        finally:
+            driver.close()
+    except Exception as error:  # CLI should provide a useful failure without a traceback.
+        print(f"Source backfill failed: {error}", file=sys.stderr)
+        return 1
+    print(
+        "Source backfill complete: "
+        + ", ".join(f"{key}={value}" for key, value in report.items()),
+        file=out,
+    )
+    return 0
+
+
+def provenance_command(settings: Settings, source_id: str, out=sys.stdout) -> int:
+    """Walk everything one source claimed, including later-contradicted rows."""
+    try:
+        driver = _driver(settings)
+        try:
+            rows = Neo4jGraphWriter(driver, database=settings.database).provenance_for_source(source_id)
+        finally:
+            driver.close()
+    except Exception as error:
+        print(f"Provenance walk failed: {error}", file=sys.stderr)
+        return 1
+    print(f"Claims by source '{source_id}': {len(rows)} row(s)", file=out)
+    for row in rows:
+        print(
+            f"- {row.subject} -[{row.relation}]-> {row.object} "
+            f"confidence={row.confidence} source_ref={row.source_ref} "
+            f"evidence={row.evidence}",
+            file=out,
+        )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Principle Graph local knowledge-graph tools")
     subparsers = parser.add_subparsers(dest="command")
@@ -397,6 +438,39 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     migrate.set_defaults(handler=lambda: migrate_ledger_command(Settings.from_env()))
+    backfill = subparsers.add_parser(
+        "backfill-sources",
+        help="create :Source nodes and FROM_SOURCE edges for existing ledger rows (ADR-0004)",
+        description=(
+            "Backfill per-source provenance in place (ADR-0004, issue #79): one "
+            ":Source node per source id — the source_ref prefix before the first "
+            "colon — carrying the id and first-seen metadata, plus a FROM_SOURCE "
+            "edge from every ledger row to its source. The denormalized "
+            "source_ref string on rows is untouched; ledger identity depends on "
+            "it. Idempotent: re-running matches already-linked rows and existing "
+            ":Source nodes and changes no state — timestamps included — so the "
+            "command is safe to repeat. New ingestion writes the link "
+            "automatically; only pre-existing rows need this pass."
+        ),
+    )
+    backfill.set_defaults(handler=lambda: backfill_sources_command(Settings.from_env()))
+    provenance = subparsers.add_parser(
+        "provenance",
+        help="walk everything one source claimed, including rows later contradicted (ADR-0004)",
+        description=(
+            "Provenance walk (ADR-0004, issue #79): follow FROM_SOURCE edges from "
+            "the :Source node back to every ledger row that source produced — "
+            "rows a later verdict or re-aggregation contradicted included — with "
+            "their refs and evidence. Read-only over the ledger: what a source "
+            "claimed stays visible whatever happened to it afterwards."
+        ),
+    )
+    provenance.add_argument(
+        "source_id",
+        help=":Source node id — the source_ref prefix before the first colon, e.g. book-1",
+    )
+    provenance.set_defaults(
+        handler=lambda: provenance_command(Settings.from_env(), args.source_id))
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()

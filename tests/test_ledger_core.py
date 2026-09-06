@@ -225,3 +225,41 @@ def test_unknown_mode_raises_before_any_planning():
         assert "repeat mode" in str(exc)
     else:
         raise AssertionError("expected ValueError for unknown mode")
+
+
+# ---------------------------------------------------------------------------
+# Source-id prefix rule (issue #79, ADR-0004): the :Source identity grammar.
+# ---------------------------------------------------------------------------
+
+from principle_graph.ledger import source_id_of
+
+
+def test_source_id_is_the_prefix_before_the_first_colon():
+    assert source_id_of("book-1:chapter-2/section-3/page-14") == "book-1"
+
+
+def test_source_id_takes_only_the_first_segment():
+    assert source_id_of("doc:chunk-1:extra") == "doc"
+
+
+def test_source_id_accepts_common_id_shapes():
+    for ref in ("markdown:chunk-0", "pdf:p3", "demo-doc:1", "a.b_c-d:x"):
+        assert source_id_of(ref) == ref.split(":", 1)[0]
+
+
+def test_source_id_rejects_refs_without_a_prefix():
+    try:
+        source_id_of("chunk-1")
+    except ValueError as exc:
+        assert "chunk-1" in str(exc) and "source id" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for prefix-less source_ref")
+
+
+def test_source_id_rejects_empty_and_malformed_prefixes():
+    for ref in ("", ":chunk-1", "bad id:x", "book 1:x", "   :x"):
+        try:
+            source_id_of(ref)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {ref!r}")

@@ -41,6 +41,26 @@ no-op under the default keep-first mode.
 | `created_at` | datetime | yes | First persistence time. |
 | `updated_at` | datetime | yes | Last touch time (keep-first never rewrites values). |
 
+### `Source`
+
+Per-source provenance node (ADR-0004): one per source id — the `source_ref`
+prefix before the first colon (for example `book-1` in
+`book-1:chapter-2/page-14`). Created automatically on ingestion and by the
+idempotent `pg backfill-sources` pass for pre-existing rows.
+
+| Property | Type | Required | Meaning |
+|---|---|---:|---|
+| `id` | string | yes | Source id: the `source_ref` prefix before the first colon. |
+| `first_seen` | datetime | yes | `created_at` of the earliest row linked to this source. |
+
+## Relationships (Provenance)
+
+`(:ExtractionEvent)-[:FROM_SOURCE]->(:Source)` links every ledger row to the
+source it came from (ADR-0004). The link is additive: rows keep their
+denormalized `source_ref` string — ledger identity depends on it (ADR-0002).
+`pg provenance <source-id>` walks everything one source claimed, including rows
+later contradicted.
+
 ## Relationships (Arrows)
 
 Every typed, directed relationship uses its domain relation as the Neo4j relationship type
@@ -69,7 +89,8 @@ backfill migration removes them.
 
 - a uniqueness constraint on `Entity(name, type)`;
 - a 1024-dimensional cosine vector index on `Entity.embedding`, matching the local `bge-m3` embedding model (ADR-0001);
-- a range index on `ExtractionEvent(source_ref)` for provenance lookups (ADR-0002).
+- a range index on `ExtractionEvent(source_ref)` for provenance lookups (ADR-0002);
+- a range index on `Source(id)` for provenance walks (ADR-0004).
 
 Neo4j property types are enforced by the application write layer (including confidence bounds,
 non-null required fields, and timestamp assignment). Neo4j does not support a property schema

@@ -6,8 +6,31 @@ this module decides what the writes are. Schema context: ADR-0002.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Sequence
+
+# :Source identity grammar (ADR-0004): the source_ref prefix before the first
+# colon. Conservative shapes keep the walkable id space predictable.
+_SOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def source_id_of(source_ref: str) -> str:
+    """Source-id prefix of a ``source_ref``: everything before the first colon.
+
+    ``book-1:chapter-2/page-14`` → ``book-1`` (issue #79, ADR-0004). A ref with
+    no colon prefix has no walkable source: new ingestion rejects it before any
+    write; the source backfill treats it as a data error. Empty prefixes are
+    malformed for the same reason.
+    """
+    ref = str(source_ref)
+    source_id, sep, _rest = ref.partition(":")
+    if not sep or not _SOURCE_ID.fullmatch(source_id):
+        raise ValueError(
+            f"source_ref {source_ref!r} has no valid source id prefix "
+            "(expected '<source-id>:...' with an identifier prefix)"
+        )
+    return source_id
 
 
 @dataclass(frozen=True)
@@ -177,4 +200,5 @@ __all__ = [
     "complement_aggregate",
     "plan_ledger_writes",
     "resolve_repeat_mode",
+    "source_id_of",
 ]
