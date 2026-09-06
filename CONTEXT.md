@@ -29,9 +29,25 @@ _Avoid_: Concept, node, term
 A typed, directed edge between two entities, identified by its endpoints plus relation type. A single relationship is updated in place as extractions repeat; it is never duplicated per source.
 _Avoid_: Triple, link, fact
 
+**Canonical relation**:
+The registry-normalized relation type actually written to the ledger identity and the arrow. Alias spellings and inverse directions collapse into it at the write boundary.
+_Avoid_: Fixed enum, closed vocabulary
+
+**Raw relation**:
+The relation verb exactly as the extractor proposed it, preserved on the ledger row for provenance when normalization changes it.
+_Avoid_: Original edge, dirty verb
+
+**Label registry**:
+A versioned data file mapping canonical labels to aliases, inverse pairs, and descriptions. One generic loader serves relations and domains; unknown labels pass through flagged, never rejected.
+_Avoid_: Enum, allowlist, code constant
+
 **Confidence**:
 Accumulated support for a relationship, aggregated across independent extraction events. Not a truth score.
 _Avoid_: Score, probability
+
+**Domain tag**:
+An optional registry-normalized label on an extraction event naming the belief domain it belongs to (e.g. economics). Absent means explicitly untagged.
+_Avoid_: Category, topic, folder
 
 **Scope conditions**:
 Qualifiers that keep a conditionally-true relationship from being wrongly generalized. Later extractions may add but never erase them.
@@ -51,6 +67,10 @@ _Avoid_: Approval, sign-off
 **Rejected record**:
 A delta item turned away at review, retained with full provenance in the local rejected log — never committed, never contributing confidence.
 _Avoid_: Discard, failed extraction
+
+**Verdict**:
+An append-only, receipt-shaped record of a fact-check over one extraction event: support, refute, or unclear, with its own confidence, evidence URLs, and provenance. Verdicts never mutate rows or confidences; they inform human decisions.
+_Avoid_: Status, rating, review score
 
 **Fan-out**:
 Querying the graph with new information to get ranked candidate reasoning directions.
