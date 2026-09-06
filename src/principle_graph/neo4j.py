@@ -665,6 +665,94 @@ class Neo4jGraphWriter:
                 "unknown_flagged": len(plan.unknown_flagged),
             }
 
+    # --- decide-mode fact-check store (issue #80, ADR-0005) ----------------
+    _FACTCHECK_ROWS_FOR_DOMAIN_QUERY = (
+        "MATCH (s:Entity)-[:REPORTED]->(e:ExtractionEvent)-[:ABOUT]->(o:Entity) "
+        "WHERE e.domain = $domain "
+        "RETURN s.name AS subject, e.relation AS relation, o.name AS object, "
+        "e.source_ref AS source_ref, e.confidence AS confidence, "
+        "e.evidence AS evidence, e.scope_conditions AS scope_conditions, "
+        "e.domain AS domain, e.raw_relation AS raw_relation "
+        "ORDER BY e.created_at"
+    )
+    # Append-only receipt: CREATE (never MERGE) makes each run a fresh verdict;
+    # rows are only MATCHed — no SET touches row or arrow properties.
+    _VERDICT_CREATE_QUERY = (
+        "MATCH (s:Entity {name: $subject})-[:REPORTED]->"
+        "(e:ExtractionEvent {relation: $relation, source_ref: $source_ref})"
+        "-[:ABOUT]->(o:Entity {name: $object}) "
+        "CREATE (v:Verdict {id: $verdict_id, verdict: $verdict, "
+        "confidence: $confidence, evidence_urls: $evidence_urls, "
+        "model: $model, search_provider: $search_provider, "
+        "reasoning: $reasoning, created_at: datetime()}) "
+        "CREATE (v)-[:CHECKS]->(e) "
+        "RETURN v.id AS id"
+    )
+    _VERDICTS_FOR_SOURCE_QUERY = (
+        "MATCH (src:Source {id: $source_id})-[:FROM_SOURCE]->"
+        "(e:ExtractionEvent)<-[:REPORTED]-(s:Entity), "
+        "(e)-[:ABOUT]->(o:Entity), (v:Verdict)-[:CHECKS]->(e) "
+        "RETURN s.name AS subject, e.relation AS relation, o.name AS object, "
+        "e.source_ref AS source_ref, v.verdict AS verdict, "
+        "v.confidence AS confidence, v.evidence_urls AS evidence_urls, "
+        "v.model AS model, v.search_provider AS search_provider, "
+        "v.reasoning AS reasoning, toString(v.created_at) AS created_at "
+        "ORDER BY v.created_at, v.id"
+    )
+
+    def rows_for_domain(self, domain: str) -> list[LedgerRow]:
+        """All ledger rows carrying a domain tag (ADR-0002 optional field)."""
+        with self.driver.session(database=self.database) as session:
+            return [
+                LedgerRow(
+                    record["subject"], _relation(record["relation"]),
+                    record["object"], record["source_ref"] or "",
+                    float(record["confidence"] or 0.0),
+                    record["evidence"] or "", record["scope_conditions"] or "",
+                    record["domain"] or "",
+                    raw_relation=record["raw_relation"] or "",
+                )
+                for record in session.run(
+                    self._FACTCHECK_ROWS_FOR_DOMAIN_QUERY, domain=domain)
+            ]
+
+    def save_verdicts(self, receipts) -> dict[str, int]:
+        """Write append-only :Verdict nodes CHECKS-wired to their rows (ADR-0005).
+
+        Each receipt becomes a new node (CREATE, not MERGE) so re-runs append
+        fresh verdicts; rows and arrows are never mutated. Receipts whose row
+        identity no longer exists are counted, not written.
+        """
+        import uuid
+        created = 0
+        not_found = 0
+        with self.driver.session(database=self.database) as session:
+            for receipt in receipts:
+                record = session.run(
+                    self._VERDICT_CREATE_QUERY,
+                    verdict_id=str(uuid.uuid4()),
+                    subject=receipt.subject, relation=_relation(receipt.relation),
+                    object=receipt.object, source_ref=receipt.source_ref,
+                    verdict=receipt.verdict, confidence=receipt.confidence,
+                    evidence_urls=list(receipt.evidence_urls),
+                    model=receipt.model, search_provider=receipt.search_provider,
+                    reasoning=receipt.reasoning,
+                ).single()
+                if record is None:
+                    not_found += 1
+                else:
+                    created += 1
+        return {"verdicts_created": created, "rows_not_found": not_found}
+
+    def verdicts_for_source(self, source_id: str) -> list[dict]:
+        """Verdicts over everything one source claimed (per-source walking)."""
+        with self.driver.session(database=self.database) as session:
+            return [
+                dict(record)
+                for record in session.run(
+                    self._VERDICTS_FOR_SOURCE_QUERY, source_id=source_id)
+            ]
+
     def get_edge(self, subject: str, relation: str, object_: str) -> GraphEdge | None:
         relation = _relation(relation)
         query = (

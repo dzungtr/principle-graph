@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from principle_graph.review import GraphDelta
+
 from principle_graph.cli import (
     PreflightError,
     ingest_command,
@@ -202,6 +204,9 @@ class _FakeStats:
 class _FakeResult:
     def __init__(self, verdict: str) -> None:
         self.stats = _FakeStats(verdict)
+        # Issue #80 trigger surfacing reads the committed delta; empty here.
+        self.delta = GraphDelta()
+        self.graph = None  # no writer; the trigger notice is skipped
 
 
 class _FakeOrchestrator:

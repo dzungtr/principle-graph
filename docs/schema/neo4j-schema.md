@@ -98,7 +98,8 @@ backfill migration removes them.
 - a uniqueness constraint on `Entity(name, type)`;
 - a 1024-dimensional cosine vector index on `Entity.embedding`, matching the local `bge-m3` embedding model (ADR-0001);
 - a range index on `ExtractionEvent(source_ref)` for provenance lookups (ADR-0002);
-- a range index on `Source(id)` for provenance walks (ADR-0004).
+- a range index on `Source(id)` for provenance walks (ADR-0004);
+- a range index on `Verdict(id)` for append-only fact-check receipts (ADR-0005).
 
 Neo4j property types are enforced by the application write layer (including confidence bounds,
 non-null required fields, and timestamp assignment). Neo4j does not support a property schema
