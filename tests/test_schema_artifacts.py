@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
-DDL = (ROOT / "docs/schema/neo4j-schema.cypher").read_text()
+DDL = (ROOT / "src/principle_graph/data/neo4j-schema.cypher").read_text()
 SPEC = (ROOT / "docs/schema/neo4j-schema.md").read_text()
 
 

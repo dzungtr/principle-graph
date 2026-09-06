@@ -1,7 +1,9 @@
 # Neo4j prototype data model
 
 This document defines the persisted graph contract for the Principle Graph prototype. The
-runnable DDL is [`neo4j-schema.cypher`](neo4j-schema.cypher).
+runnable DDL ships as package data at
+`src/principle_graph/data/neo4j-schema.cypher` (a pointer to the former
+`docs/schema/` location is kept here for history).
 
 ## Nodes
 
@@ -93,7 +95,7 @@ backfill migration removes them.
 
 ## Constraints and indexes
 
-`docs/schema/neo4j-schema.cypher` applies:
+`src/principle_graph/data/neo4j-schema.cypher` applies (the packaged DDL the `pg apply-schema` command loads):
 
 - a uniqueness constraint on `Entity(name, type)`;
 - a 1024-dimensional cosine vector index on `Entity.embedding`, matching the local `bge-m3` embedding model (ADR-0001);

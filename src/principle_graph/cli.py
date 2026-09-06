@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.resources
 import json
 import sys
 from pathlib import Path
@@ -16,7 +17,9 @@ from .neo4j import Neo4jEntityStore, Neo4jGraphWriter, load_existing_edges
 from .orchestrator import IngestOrchestrator
 from .resolution import Entity
 
-_SCHEMA = Path(__file__).parents[2] / "docs" / "schema" / "neo4j-schema.cypher"
+# Schema DDL ships as package data so it resolves in any install layout
+# (repo checkout, wheel, or the nix-built application in /nix/store).
+_SCHEMA = importlib.resources.files(__package__).joinpath("data", "neo4j-schema.cypher")
 
 
 def _driver(settings: Settings):
