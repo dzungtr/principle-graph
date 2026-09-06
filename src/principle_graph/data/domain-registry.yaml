@@ -1,0 +1,32 @@
+# Domain registry (PRD #76 slice #78): canonical domain tags for ledger rows.
+#
+# Loaded by the same generic label-registry loader as the relation registry
+# (ADR-0003); no second registry implementation. Alias canonicalization is
+# applied by Neo4jGraphWriter before any Cypher is generated; unknown domains
+# pass through flagged, never rejected. Absent or empty means untagged.
+# Consolidating domains is an edit here — no code change.
+#
+# Rules:
+# - keys and aliases are lowercase snake_case (extraction-contract label shape);
+# - `inverse` is not used for domains — never declare it;
+# - unknown domains are not listed here — they pass through as-is.
+version: 1
+labels:
+  economics:
+    aliases: [macroeconomics, microeconomics]
+    description: Production, trade, prices, and incentives.
+  finance:
+    aliases: [markets, investing]
+    description: Money, capital, assets, and risk.
+  psychology:
+    aliases: [cognition, behavior]
+    description: Mind, motivation, and behavior.
+  politics:
+    aliases: [governance, policy]
+    description: Power, institutions, and collective decisions.
+  technology:
+    aliases: [engineering, computing]
+    description: Tools, systems, and their construction.
+  health:
+    aliases: [medicine, wellness]
+    description: Bodies, disease, and care.

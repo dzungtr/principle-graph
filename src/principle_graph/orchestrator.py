@@ -62,6 +62,9 @@ class IngestStats:
     # occurrence counts from the writer's boundary flag; empty when all verbs
     # canonicalized or the writer does not track them.
     unknown_relations: tuple[tuple[str, int], ...] = ()
+    # Slice #78: unknown domains passed through at the write boundary, per-domain
+    # occurrence counts; empty when all domains canonicalized or untracked.
+    unknown_domains: tuple[tuple[str, int], ...] = ()
 
     def render(self) -> str:
         committed_lines = [
@@ -88,6 +91,11 @@ class IngestStats:
                 f"{verb}={count}" for verb, count in self.unknown_relations)
             committed_lines.append(
                 f"unknown relations passed through uncanonicalized: {unknown}")
+        if self.unknown_domains:
+            unknown_domains = ", ".join(
+                f"{name}={count}" for name, count in self.unknown_domains)
+            committed_lines.append(
+                f"unknown domains passed through uncanonicalized: {unknown_domains}")
         committed_lines.append(
             f"elapsed seconds: {self.elapsed_seconds:.3f}",
         )
@@ -179,6 +187,9 @@ class IngestOrchestrator:
             unknown_relations=tuple(
                 sorted(getattr(self.writer, "unknown_relation_counts", {}).items())
             ),
+            unknown_domains=tuple(
+                sorted(getattr(self.writer, "unknown_domain_counts", {}).items())
+            ),
         )
         return IngestResult(stats=stats, delta=delta, review=review, graph=self.writer)
 
@@ -244,7 +255,8 @@ class IngestOrchestrator:
             edges.append(GraphEdge(
                 s_name, candidate["relation"].upper(), o_name,
                 candidate["confidence"], candidate["source_ref"],
-                (candidate["evidence"],), candidate["scope_conditions"]))
+                (candidate["evidence"],), candidate["scope_conditions"],
+                candidate.get("domain", "")))
         return assemble_delta(edges, existing=existing, entities=list(entity_map.values()))
 
     @staticmethod

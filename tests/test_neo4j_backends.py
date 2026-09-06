@@ -510,3 +510,40 @@ def test_edges_for_entity_joins_provenance_per_arrow_in_mixed_pairs():
         ("MAY_DESCRIBE", "doc:chunk-2", ("second claim",)),
         ("ANCHORS", "book:7", ("anchor claim",)),
     ]
+
+
+# --- Domain tagging at the write boundary (issue #78) ---
+
+def _merge_params(edge, **writer_kwargs):
+    driver = RecordingDriver()
+    writer = Neo4jGraphWriter(driver, **writer_kwargs)
+    writer.upsert_extraction(edge)
+    (session,) = driver.sessions
+    merge_query, params = session.queries[1]
+    assert "e.domain = $domain" in merge_query
+    return writer, params
+
+
+def test_writer_persists_untagged_domain_by_default():
+    writer, params = _merge_params(
+        GraphEdge("a", "supports", "b", 0.5, "s1:c1", ("w",), ""))
+    assert params["domain"] == ""
+    assert writer.unknown_domain_counts == {}
+
+
+def test_writer_canonicalizes_domain_alias_before_write():
+    writer, params = _merge_params(
+        GraphEdge("a", "supports", "b", 0.5, "s1:c1", ("w",), "",
+                  domain="macroeconomics"))
+    assert params["domain"] == "economics"
+    assert writer.unknown_domain_counts == {}
+
+
+def test_unknown_domain_passes_through_flagged():
+    edge = GraphEdge("a", "supports", "b", 0.5, "s1:c1", ("w",), "",
+                     domain="xenosophy")
+    writer, params = _merge_params(edge)
+    assert params["domain"] == "xenosophy"
+    writer.upsert_extraction(GraphEdge(
+        "c", "supports", "d", 0.5, "s2:c1", ("w",), "", domain="xenosophy"))
+    assert writer.unknown_domain_counts == {"xenosophy": 2}

@@ -105,6 +105,11 @@ def default_registry_path() -> Path:
     return Path(__file__).parent / "data" / "relation-registry.yaml"
 
 
+def default_domain_registry_path() -> Path:
+    """The packaged domain registry (PRD #76 slice #78); same loader contract."""
+    return Path(__file__).parent / "data" / "domain-registry.yaml"
+
+
 def load_label_registry(path: str | Path) -> LabelRegistry:
     """Load and validate a registry YAML file; malformed files raise ``RegistryError``."""
     path = Path(path)
@@ -201,6 +206,7 @@ __all__ = [
     "LabelEntry",
     "LabelRegistry",
     "RegistryError",
+    "default_domain_registry_path",
     "default_registry_path",
     "load_label_registry",
 ]

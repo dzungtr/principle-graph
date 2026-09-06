@@ -7,7 +7,12 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .label_registry import LabelRegistry, default_registry_path, load_label_registry
+from .label_registry import (
+    LabelRegistry,
+    default_domain_registry_path,
+    default_registry_path,
+    load_label_registry,
+)
 from .ledger import LedgerRow, plan_ledger_writes, resolve_repeat_mode, source_id_of
 from .normalization import plan_normalization
 from .reduction import GraphEdge, GraphEntity
@@ -74,6 +79,7 @@ class Neo4jGraphWriter:
         rejected_log_path: str | Path = ".pg/rejected.jsonl",
         repeat_mode: str = "keep-first",
         relation_registry: LabelRegistry | None = None,
+        domain_registry: LabelRegistry | None = None,
     ) -> None:
         self.driver = driver
         self.database = database
@@ -86,6 +92,14 @@ class Neo4jGraphWriter:
             relation_registry if relation_registry is not None
             else load_label_registry(default_registry_path())
         )
+        # Domain tags (PRD #76 slice #78) share the loader contract; same
+        # fail-fast-at-construction rule. Unknown domains pass through flagged.
+        self.domain_registry = (
+            domain_registry if domain_registry is not None
+            else load_label_registry(default_domain_registry_path())
+        )
+        self.unknown_domain_counts: dict[str, int] = {}
+        self._warned_unknown_domain: set[str] = set()
         # Unknown verbs pass through flagged: warned once per distinct verb,
         # counted per occurrence for the run summary (PRD #76).
         self.unknown_relation_counts: dict[str, int] = {}
@@ -112,6 +126,30 @@ class Neo4jGraphWriter:
                     canon.raw_relation,
                 )
         return canon.subject, canon.relation, canon.object, canon.raw_relation
+
+    def _canonical_domain(self, domain: str) -> str:
+        """Canonicalize one optional domain tag at the write boundary (slice #78).
+
+        Empty stays untagged; aliases collapse to the canonical domain; unknown
+        domains pass through unchanged and are flagged (warned once per distinct
+        domain, counted per occurrence for the run summary) — never rejected.
+        """
+        domain = str(domain or "").strip()
+        if not domain:
+            return ""
+        canonical = self.domain_registry.canonical_for(domain)
+        if not self.domain_registry.is_known(domain):
+            self.unknown_domain_counts[canonical] = (
+                self.unknown_domain_counts.get(canonical, 0) + 1
+            )
+            if canonical not in self._warned_unknown_domain:
+                self._warned_unknown_domain.add(canonical)
+                logger.warning(
+                    "unregistered domain %r passed through untagged-canonically; "
+                    "add it (or an alias) to the domain registry to consolidate it",
+                    canonical,
+                )
+        return canonical
 
     def upsert_entity(self, entity: GraphEntity) -> None:
         query = (
@@ -230,9 +268,11 @@ class Neo4jGraphWriter:
             edge.subject, edge.relation, edge.object
         )
         relation = _relation(relation)
+        domain = self._canonical_domain(getattr(edge, "domain", ""))
         candidate = LedgerRow(
             subject, relation, object_, edge.source_ref, edge.confidence,
             edge.evidence[0] if edge.evidence else "", edge.scope_conditions,
+            domain=domain,
             raw_relation=raw_relation,
         )
         with self.driver.session(database=self.database) as session:

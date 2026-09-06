@@ -151,3 +151,26 @@ def test_unreadable_registry_file_is_rejected(tmp_path):
 def test_labels_with_omitted_or_null_aliases_load_with_no_aliases(tmp_path):
     registry = _load(tmp_path, "version: 1\nlabels:\n  a:\n    description: x\n")
     assert registry.entry("a").aliases == ()
+
+
+# --- Domain registry (issue #78): same loader, no second implementation ---
+
+def test_packaged_domain_registry_loads_through_the_shared_loader():
+    from principle_graph.label_registry import default_domain_registry_path
+    domain_registry = load_label_registry(default_domain_registry_path())
+    assert domain_registry.version >= 1
+    assert "economics" in domain_registry.vocabulary()
+
+
+def test_domain_alias_collapses_to_canonical():
+    from principle_graph.label_registry import default_domain_registry_path
+    domain_registry = load_label_registry(default_domain_registry_path())
+    assert domain_registry.canonical_for("macroeconomics") == "economics"
+    assert domain_registry.is_known("macroeconomics")
+
+
+def test_unknown_domain_passes_through_unchanged():
+    from principle_graph.label_registry import default_domain_registry_path
+    domain_registry = load_label_registry(default_domain_registry_path())
+    assert domain_registry.canonical_for("xenosophy") == "xenosophy"
+    assert not domain_registry.is_known("xenosophy")

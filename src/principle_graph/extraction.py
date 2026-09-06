@@ -20,6 +20,7 @@ PROPOSE_TRIPLE_TOOL: dict[str, Any] = {
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             "evidence": {"type": "string"},
             "scope_conditions": {"type": "string"},
+            "domain": {"type": "string"},
             "source_ref": {"type": "string"},
         },
         "required": [
@@ -35,7 +36,9 @@ Extract only relationships explicitly asserted or reasonably implied by that chu
 Do not use general or outside knowledge. If a field cannot be grounded in the chunk,
 omit the candidate. Preserve qualifiers in scope_conditions. Return zero or more
 propose_triple tool calls and no prose claims outside tool calls. Use the chunk's
-source_ref verbatim. Confidence is for this extraction event only; ambiguity lowers it."""
+source_ref verbatim. Confidence is for this extraction event only; ambiguity lowers it.
+Include domain only when the chunk itself grounds the claim in a topic area —
+never guess; omit the field to leave the row untagged."""
 
 
 class MessagesClient(Protocol):
