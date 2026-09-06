@@ -38,7 +38,7 @@ no-op under the default keep-first mode.
 | `confidence` | float | yes | This extraction event's own confidence in `[0.0, 1.0]`. |
 | `evidence` | string | yes | Single supporting snippet — lists exist nowhere anymore. |
 | `scope_conditions` | string | no | Qualifiers claimed by this extraction. |
-| `domain` | string | no | Optional domain tag for later per-domain belief. |
+| `domain` | string | no | Optional domain tag, canonicalized against `domain-registry.yaml` at the write boundary (aliases collapse, unknowns pass through flagged); untagged when absent (slice #78). |
 | `created_at` | datetime | yes | First persistence time. |
 | `updated_at` | datetime | yes | Last touch time (keep-first never rewrites values). |
 

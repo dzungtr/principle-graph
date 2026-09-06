@@ -25,6 +25,8 @@ class GraphEdge:
     source_ref: str = ""
     evidence: tuple[str, ...] = ()
     scope_conditions: str = ""
+    # Optional extraction-time domain tag (PRD #76 slice #78); "" = untagged.
+    domain: str = ""
 
 
 @dataclass(frozen=True)

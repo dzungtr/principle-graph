@@ -78,3 +78,19 @@ def test_pdf_chunk_merges_unterminated_paragraph_without_heading():
 def test_markdown_source_id_is_traceable():
     chunk = chunk_markdown("# Intro\ntext", source_id="book-1")[0]
     assert chunk.source_ref == "book-1:chunk-1"
+
+
+# --- Optional domain field (issue #78) ---
+
+def test_domain_absent_means_untagged_and_candidate_is_unchanged():
+    assert "domain" not in validate_triple(dict(VALID))
+
+
+def test_domain_snake_case_passes_validation():
+    assert validate_triple({**VALID, "domain": "economics"})["domain"] == "economics"
+
+
+@pytest.mark.parametrize("domain", ["Economics", "not a domain", "econ-1", ""])
+def test_rejects_malformed_domain(domain):
+    with pytest.raises(ContractError):
+        validate_triple({**VALID, "domain": domain})

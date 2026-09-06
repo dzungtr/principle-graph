@@ -30,6 +30,13 @@ def validate_triple(candidate: dict[str, Any]) -> dict[str, Any]:
     confidence = candidate["confidence"]
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
         raise ContractError("confidence must be a number in [0, 1]")
+    # Optional domain tag (PRD #76 slice #78): absent means untagged; when
+    # present it must already be lowercase snake_case — canonicalization
+    # against the domain registry happens at the write boundary, not here.
+    if "domain" in candidate:
+        domain = candidate["domain"]
+        if not isinstance(domain, str) or not _LABEL.fullmatch(domain):
+            raise ContractError("domain must be lowercase snake_case when present")
     return candidate
 
 

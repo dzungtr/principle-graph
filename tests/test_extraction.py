@@ -68,3 +68,27 @@ def test_ignores_non_tool_response_content():
     run = SequentialExtractor(client).run(chunks)
     assert run.candidates == []
     assert run.rejected == []
+
+
+# --- Domain tag in the tool contract (issue #78) ---
+
+def test_propose_triple_schema_has_optional_domain():
+    properties = PROPOSE_TRIPLE_TOOL["input_schema"]["properties"]
+    assert properties["domain"] == {"type": "string"}
+    assert "domain" not in PROPOSE_TRIPLE_TOOL["input_schema"]["required"]
+
+
+def test_system_prompt_tags_domain_only_when_chunk_grounded():
+    from principle_graph.extraction import SYSTEM_PROMPT
+    assert "domain" in SYSTEM_PROMPT
+    assert "never guess" in SYSTEM_PROMPT
+
+
+def test_candidate_with_domain_is_staged():
+    chunks = chunk_markdown("# One\nrates reduce borrowing.", "book")
+    client = FakeMessages([
+        Response([ToolUse("tool_use", "propose_triple",
+                          triple(chunks[0].source_ref) | {"domain": "economics"})]),
+    ])
+    run = SequentialExtractor(client).run(chunks)
+    assert run.candidates[0]["domain"] == "economics"

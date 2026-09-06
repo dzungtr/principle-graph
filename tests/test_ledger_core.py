@@ -263,3 +263,11 @@ def test_source_id_rejects_empty_and_malformed_prefixes():
         except ValueError:
             continue
         raise AssertionError(f"expected ValueError for {ref!r}")
+
+
+# --- Domain tag is not part of ledger identity (issue #78) ---
+
+def test_domain_is_excluded_from_row_identity():
+    base = dict(subject="a", relation="SUPPORTS", object="b",
+                source_ref="s1:c1", confidence=0.5, evidence="w")
+    assert LedgerRow(**base, domain="economics").identity == LedgerRow(**base).identity
