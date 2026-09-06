@@ -27,3 +27,10 @@ OPTIONS {
 CREATE RANGE INDEX extraction_event_source_ref IF NOT EXISTS
 FOR (event:ExtractionEvent)
 ON (event.source_ref);
+
+// Source provenance (ADR-0004): one :Source node per source id — the source_ref
+// prefix before the first colon. Rows link to their source via FROM_SOURCE; the
+// denormalized source_ref string stays on the row (ledger identity depends on it).
+CREATE RANGE INDEX source_id IF NOT EXISTS
+FOR (source:Source)
+ON (source.id);

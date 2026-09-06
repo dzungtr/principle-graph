@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .ledger import LedgerRow, plan_ledger_writes, resolve_repeat_mode
+from .ledger import LedgerRow, plan_ledger_writes, resolve_repeat_mode, source_id_of
 from .reduction import GraphEdge, GraphEntity
 from .resolution import Entity, SimilarEntity
 
@@ -142,6 +142,35 @@ class Neo4jGraphWriter:
         "e.scope_conditions = $scope_conditions, e.domain = $domain, "
         "e.updated_at = datetime()"
     )
+    # Source provenance (issue #79, ADR-0004): appended to both row writes so new
+    # ingestion links every row to its :Source node in the same write. Additive:
+    # the row's source_ref string is untouched — ledger identity depends on it.
+    _SOURCE_LINK_CLAUSE = (
+        "MERGE (src:Source {id: $source_id}) "
+        "ON CREATE SET src.first_seen = datetime() "
+        "MERGE (e)-[:FROM_SOURCE]->(src)"
+    )
+
+    def _write_row(self, session, query: str, row: LedgerRow) -> None:
+        """Execute one row write, adding the :Source link when the row has a ref.
+
+        A row without a source id prefix is rejected here, before any write
+        fires (ADR-0004: :Source coverage stays total by construction).
+        """
+        params: dict[str, Any] = {
+            "subject": row.subject,
+            "object": row.object,
+            "relation": row.relation,
+            "source_ref": row.source_ref,
+            "confidence": row.confidence,
+            "evidence": row.evidence,
+            "scope_conditions": row.scope_conditions,
+            "domain": row.domain,
+        }
+        if row.source_ref:
+            params["source_id"] = source_id_of(row.source_ref)
+            query = f"{query} {self._SOURCE_LINK_CLAUSE}"
+        session.run(query, **params)
 
     def upsert_extraction(self, edge: GraphEdge) -> None:
         """Append one accepted extraction as a ledger row and recompute the arrow.
@@ -170,29 +199,9 @@ class Neo4jGraphWriter:
             ]
             plan = plan_ledger_writes(existing, [candidate], mode=self.repeat_mode)
             for row in plan.rows_to_create:
-                session.run(
-                    self._ROW_MERGE_QUERY,
-                    subject=row.subject,
-                    object=row.object,
-                    relation=row.relation,
-                    source_ref=row.source_ref,
-                    confidence=row.confidence,
-                    evidence=row.evidence,
-                    scope_conditions=row.scope_conditions,
-                    domain=row.domain,
-                )
+                self._write_row(session, self._ROW_MERGE_QUERY, row)
             for row in plan.rows_to_update:
-                session.run(
-                    self._ROW_REFRESH_QUERY,
-                    subject=row.subject,
-                    object=row.object,
-                    relation=row.relation,
-                    source_ref=row.source_ref,
-                    confidence=row.confidence,
-                    evidence=row.evidence,
-                    scope_conditions=row.scope_conditions,
-                    domain=row.domain,
-                )
+                self._write_row(session, self._ROW_REFRESH_QUERY, row)
             for update in plan.arrow_updates:
                 query = (
                     f"MATCH (s:Entity {{name: $subject}}), (o:Entity {{name: $object}}) "
@@ -348,6 +357,114 @@ class Neo4jGraphWriter:
                 "arrows_unchanged": len(plan.arrow_updates) - arrows_recomputed,
                 "legacy_props_stripped": stripped,
             }
+
+    # --- source provenance backfill + walk (issue #79, ADR-0004) ----------
+    # All rows that carry a source_ref, with their link state; created_at order
+    # makes the earliest row per source the first_seen seed.
+    _SOURCES_ROWS_LOAD_QUERY = (
+        "MATCH (s:Entity)-[:REPORTED]->(e:ExtractionEvent)-[:ABOUT]->(o:Entity) "
+        "WHERE e.source_ref IS NOT NULL AND e.source_ref <> '' "
+        "RETURN s.name AS subject, e.relation AS relation, o.name AS object, "
+        "e.source_ref AS source_ref, e.created_at AS created_at, "
+        "EXISTS { (e)-[:FROM_SOURCE]->() } AS has_source "
+        "ORDER BY e.created_at"
+    )
+    _SOURCES_IDS_QUERY = "MATCH (src:Source) RETURN collect(src.id) AS ids"
+    # ON CREATE SET only: a re-run must not touch an existing :Source node, so a
+    # second backfill changes no state at all (issue #79 idempotency AC).
+    _SOURCES_NODE_MERGE_QUERY = (
+        "MERGE (src:Source {id: $source_id}) "
+        "ON CREATE SET src.first_seen = $first_seen"
+    )
+    _SOURCES_LINK_QUERY = (
+        "MATCH (s:Entity {name: $subject})-[:REPORTED]->"
+        "(e:ExtractionEvent {relation: $relation, source_ref: $source_ref})-[:ABOUT]->"
+        "(o:Entity {name: $object}) "
+        "MATCH (src:Source {id: $source_id}) "
+        "MERGE (e)-[:FROM_SOURCE]->(src)"
+    )
+    # Provenance walk: everything one source claimed, latest state irrelevant —
+    # rows a later extraction or verdict contradicted still appear (issue #79).
+    _PROVENANCE_WALK_QUERY = (
+        "MATCH (src:Source {id: $source_id})<-[:FROM_SOURCE]-"
+        "(e:ExtractionEvent)<-[:REPORTED]-(s:Entity) "
+        "MATCH (e)-[:ABOUT]->(o:Entity) "
+        "RETURN s.name AS subject, e.relation AS relation, o.name AS object, "
+        "e.source_ref AS source_ref, e.confidence AS confidence, "
+        "e.evidence AS evidence, e.scope_conditions AS scope_conditions, "
+        "e.domain AS domain "
+        "ORDER BY e.created_at"
+    )
+
+    def backfill_sources(self) -> dict[str, int]:
+        """Create :Source nodes and FROM_SOURCE edges for existing rows (ADR-0004).
+
+        Idempotent by construction: only rows without a FROM_SOURCE edge are
+        linked, :Source nodes merge with ON CREATE SET first_seen only (first-seen
+        = the earliest linked row's created_at), and a second run issues no
+        writes at all — timestamps included. The denormalized source_ref string
+        on rows is never touched; rows without a usable source id prefix raise
+        as data errors rather than fabricating unwalkable provenance.
+        """
+        with self.driver.session(database=self.database) as session:
+            initial_ids = set(
+                session.run(self._SOURCES_IDS_QUERY).single()["ids"] or [])
+            rows = [dict(record)
+                    for record in session.run(self._SOURCES_ROWS_LOAD_QUERY)]
+            known = set(initial_ids)
+            sources_created = 0
+            edges_created = 0
+            edges_already_linked = 0
+            for record in rows:
+                source_id = source_id_of(record["source_ref"])
+                if source_id not in known:
+                    session.run(
+                        self._SOURCES_NODE_MERGE_QUERY,
+                        source_id=source_id,
+                        first_seen=record["created_at"],
+                    ).consume()
+                    known.add(source_id)
+                    sources_created += 1
+                if record["has_source"]:
+                    edges_already_linked += 1
+                    continue
+                session.run(
+                    self._SOURCES_LINK_QUERY,
+                    subject=record["subject"],
+                    relation=_relation(record["relation"]),
+                    object=record["object"],
+                    source_ref=record["source_ref"],
+                    source_id=source_id,
+                ).consume()
+                edges_created += 1
+            row_source_ids = {source_id_of(record["source_ref"]) for record in rows}
+            return {
+                "rows_seen": len(rows),
+                "edges_created": edges_created,
+                "edges_already_linked": edges_already_linked,
+                "sources_created": sources_created,
+                "sources_already_present": len(row_source_ids & initial_ids),
+            }
+
+    def provenance_for_source(self, source_id: str) -> list[LedgerRow]:
+        """Everything one source claimed: all rows linked via FROM_SOURCE (ADR-0004).
+
+        Read-only over the ledger — later verdicts or re-aggregations never hide
+        what a source claimed; rows return with their refs and evidence.
+        """
+        with self.driver.session(database=self.database) as session:
+            return [
+                LedgerRow(
+                    record["subject"], _relation(record["relation"]),
+                    record["object"], record["source_ref"] or "",
+                    float(record["confidence"] or 0.0),
+                    record["evidence"] or "", record["scope_conditions"] or "",
+                    record["domain"] or "",
+                )
+                for record in session.run(
+                    self._PROVENANCE_WALK_QUERY, source_id=source_id
+                )
+            ]
 
     def get_edge(self, subject: str, relation: str, object_: str) -> GraphEdge | None:
         relation = _relation(relation)

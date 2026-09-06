@@ -117,6 +117,28 @@ Precedence: the `--repeat-mode` flag overrides the `PG_REPEAT_MODE` env var,
 which overrides the default (`keep-first`). Invalid values fail fast with a
 clear error (exit 2) before any pre-flight or graph write.
 
+### Source provenance
+
+Every ledger row links to a `:Source` node — one per source id (the
+`source_ref` prefix before the first colon, e.g. `book-1` in
+`book-1:chapter-2/page-14`) — via a `FROM_SOURCE` edge (ADR-0004). New
+ingestion writes the link automatically. Existing graphs backfill with:
+
+```sh
+pg backfill-sources
+```
+
+The pass is idempotent: a second run changes no state. The denormalized
+`source_ref` string on rows is untouched — ledger identity depends on it — and
+rows whose reference lacks a valid source id prefix are reported as errors
+rather than linked.
+
+To walk everything one source claimed (rows later contradicted included):
+
+```sh
+pg provenance book-1
+```
+
 ### Environment
 
 `pg ingest` reads the same `.env` settings as the rest of the CLI. The relevant
