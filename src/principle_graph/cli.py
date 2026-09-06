@@ -337,9 +337,12 @@ def ingest_command(
         driver.close()
     print(result.stats.render(), file=out)
     # Decide-mode trigger surfacing (issue #80, ADR-0005): domains that the
-    # committed rows share with a different source are announced for fact-check.
-    committed = [*result.delta.new_edges, *result.delta.updated_edges]
-    domains = sorted({edge.domain for edge in committed if edge.domain})
+    # Decide-mode trigger surfacing (issue #80, ADR-0005): domains among the
+    # REVIEW-APPROVED rows are announced for fact-check. Deriving from
+    # result.review.approved (not result.delta) keeps a rejected ingest from
+    # advertising fact-check candidates that were never committed.
+    approved = [*result.review.approved.new_edges, *result.review.approved.updated_edges]
+    domains = sorted({edge.domain for edge in approved if edge.domain})
     for line in fact_check_notice(
             domains, getattr(result.graph, "rows_for_domain", None)):
         print(line, file=out)

@@ -214,6 +214,7 @@ class _FakeSession:
                 "model": params["model"],
                 "search_provider": params["search_provider"],
                 "reasoning": params["reasoning"], "checks": identity,
+                "created_at": params["created_at"],
             })
             return _Result([_Record(id=params["verdict_id"])])
         if "(v:Verdict)-[:CHECKS]->(e)" in query:
@@ -273,6 +274,9 @@ def test_save_verdicts_creates_check_wired_nodes(graph):
     assert graph["verdicts"][0]["verdict"] == "support"
     assert graph["verdicts"][0]["confidence"] == 0.8
     assert graph["verdicts"][0]["checks"] == ("S", "CAUSES", "O", "book-1:ch-1")
+    # Receipt clock is persisted verbatim — the store binds $created_at from
+    # the receipt, not the DB clock, so receipt and node timestamps agree.
+    assert graph["verdicts"][0]["created_at"] == "2026-09-06T00:00:00"
 
 
 def test_save_verdicts_counts_missing_rows(graph):

@@ -684,7 +684,7 @@ class Neo4jGraphWriter:
         "CREATE (v:Verdict {id: $verdict_id, verdict: $verdict, "
         "confidence: $confidence, evidence_urls: $evidence_urls, "
         "model: $model, search_provider: $search_provider, "
-        "reasoning: $reasoning, created_at: datetime()}) "
+        "reasoning: $reasoning, created_at: $created_at}) "
         "CREATE (v)-[:CHECKS]->(e) "
         "RETURN v.id AS id"
     )
@@ -736,7 +736,7 @@ class Neo4jGraphWriter:
                     verdict=receipt.verdict, confidence=receipt.confidence,
                     evidence_urls=list(receipt.evidence_urls),
                     model=receipt.model, search_provider=receipt.search_provider,
-                    reasoning=receipt.reasoning,
+                    reasoning=receipt.reasoning, created_at=receipt.created_at,
                 ).single()
                 if record is None:
                     not_found += 1
