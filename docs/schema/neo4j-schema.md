@@ -54,6 +54,25 @@ idempotent `pg backfill-sources` pass for pre-existing rows.
 | `id` | string | yes | Source id: the `source_ref` prefix before the first colon. |
 | `first_seen` | datetime | yes | `created_at` of the earliest row linked to this source. |
 
+### `Verdict`
+
+Append-only fact-check receipt (ADR-0005): one node per verdict produced by
+`pg fact-check`. Never merged — each run appends a fresh receipt, and rows or
+arrows are never mutated by a verdict (verdicts inform; humans decide).
+Linked to the rows it checks via `(:Verdict)-[:CHECKS]->(:ExtractionEvent)`;
+`pg fact-check --domain <d>` and the per-source walk read these receipts.
+
+| Property | Type | Required | Meaning |
+|---|---|---:|---|
+| `id` | string | yes | UUID of the receipt. |
+| `verdict` | string | yes | One of `support` / `refute` / `unclear`. |
+| `confidence` | float | yes | Verdict LLM self-reported confidence, 0.0–1.0. |
+| `evidence_urls` | list[string] | yes | Web-search evidence URLs backing the verdict. |
+| `model` | string | yes | Verdict LLM provenance (model id). |
+| `search_provider` | string | yes | Web-search provenance (e.g. `ddg`). |
+| `reasoning` | string | yes | Verdict LLM's stated rationale. |
+| `created_at` | string | yes | ISO timestamp from the receipt's injected `now()` clock. |
+
 ## Relationships (Provenance)
 
 `(:ExtractionEvent)-[:FROM_SOURCE]->(:Source)` links every ledger row to the
@@ -98,7 +117,8 @@ backfill migration removes them.
 - a uniqueness constraint on `Entity(name, type)`;
 - a 1024-dimensional cosine vector index on `Entity.embedding`, matching the local `bge-m3` embedding model (ADR-0001);
 - a range index on `ExtractionEvent(source_ref)` for provenance lookups (ADR-0002);
-- a range index on `Source(id)` for provenance walks (ADR-0004).
+- a range index on `Source(id)` for provenance walks (ADR-0004);
+- a range index on `Verdict(id)` for append-only fact-check receipts (ADR-0005).
 
 Neo4j property types are enforced by the application write layer (including confidence bounds,
 non-null required fields, and timestamp assignment). Neo4j does not support a property schema

@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from .config import Settings
 from .extraction import SequentialExtractor
+from .factcheck import fact_check_notice, fact_check_rows
 from .fanout import query_directions, render_markdown
 from .ledger import resolve_repeat_mode
 from .llm_gateway import OpenAICompatibleMessagesClient
@@ -333,6 +336,16 @@ def ingest_command(
     finally:
         driver.close()
     print(result.stats.render(), file=out)
+    # Decide-mode trigger surfacing (issue #80, ADR-0005): domains that the
+    # Decide-mode trigger surfacing (issue #80, ADR-0005): domains among the
+    # REVIEW-APPROVED rows are announced for fact-check. Deriving from
+    # result.review.approved (not result.delta) keeps a rejected ingest from
+    # advertising fact-check candidates that were never committed.
+    approved = [*result.review.approved.new_edges, *result.review.approved.updated_edges]
+    domains = sorted({edge.domain for edge in approved if edge.domain})
+    for line in fact_check_notice(
+            domains, getattr(result.graph, "rows_for_domain", None)):
+        print(line, file=out)
     return 0 if result.stats.verdict == "approved" else 4
 
 
@@ -417,7 +430,76 @@ def provenance_command(settings: Settings, source_id: str, out=sys.stdout) -> in
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_fact_check_seams(settings: Settings):
+    """Real fact-check seams: writer, DuckDuckGo searcher, local verdict LLM."""
+    from .factcheck import HtmlWebSearcher, LocalVerdictLLM
+    from .llm_gateway import OpenAICompatibleMessagesClient
+
+    driver = _driver(settings)
+    writer = Neo4jGraphWriter(driver, database=settings.database)
+    messages = OpenAICompatibleMessagesClient(
+        base_url=settings.llm_base_url, model=settings.llm_model,
+        api_key="local-placeholder",
+    )
+    llm = LocalVerdictLLM(messages, model=settings.llm_model)
+    return driver, writer, HtmlWebSearcher(), llm
+
+
+def fact_check_command(
+    settings: Settings,
+    *,
+    domain: str | None = None,
+    source: str | None = None,
+    out=sys.stdout,
+) -> int:
+    """Run decide-mode fact-checking over a domain's or a source's rows (ADR-0005)."""
+    if (domain is None) == (source is None):
+        print("Provide exactly one of --domain or --source.", file=sys.stderr)
+        return 2
+    try:
+        driver, writer, searcher, llm = _build_fact_check_seams(settings)
+        try:
+            if domain is not None:
+                rows = writer.rows_for_domain(domain)
+                label = f"domain '{domain}'"
+            else:
+                rows = writer.provenance_for_source(source)
+                label = f"source '{source}'"
+            receipts = fact_check_rows(
+                rows, searcher=searcher, llm=llm,
+                model=settings.llm_model, search_provider="duckduckgo",
+                now=lambda: datetime.now(timezone.utc).isoformat(),
+            )
+            report = writer.save_verdicts(receipts)
+            walked = (
+                writer.verdicts_for_source(source) if source is not None else None
+            )
+        finally:
+            if driver is not None:
+                driver.close()
+    except Exception as error:
+        print(f"Fact-check failed: {error}", file=sys.stderr)
+        return 1
+    print(
+        f"Fact-check over {label}: {len(rows)} row(s) checked, "
+        f"{report['verdicts_created']} verdict(s) appended "
+        f"({report['rows_not_found']} row(s) not found).",
+        file=out,
+    )
+    for receipt in receipts:
+        print(
+            f"- {receipt.subject} -[{receipt.relation}]-> {receipt.object} "
+            f"= {receipt.verdict} (confidence {receipt.confidence:.2f}, "
+            f"model={receipt.model}, search={receipt.search_provider})",
+            file=out,
+        )
+    if walked:
+        print(f"Verdicts recorded for source '{source}': {len(walked)}", file=out)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """The ``pg`` CLI parser with all subcommands registered."""
     parser = argparse.ArgumentParser(description="Principle Graph local knowledge-graph tools")
     subparsers = parser.add_subparsers(dest="command")
     check = subparsers.add_parser("check", help="verify Neo4j connectivity")
@@ -429,8 +511,8 @@ def main(argv: list[str] | None = None) -> int:
     query.add_argument("--top-k", type=int, default=5)
     query.add_argument("--max-edges-per-seed", type=int, default=20)
     query.add_argument("--format", choices=("markdown", "json"), default="markdown")
-    query.set_defaults(handler=lambda: query_command(Settings.from_env(), args.text, args.top_k,
-                                                     args.max_edges_per_seed, args.format))
+    query.set_defaults(handler=lambda a: query_command(Settings.from_env(), a.text, a.top_k,
+                                                     a.max_edges_per_seed, a.format))
     ingest = subparsers.add_parser("ingest", help="ingest a Markdown or PDF source")
     ingest.add_argument("path", help="path to a .md/.markdown or .pdf source")
     ingest.add_argument("--yes", action="store_true",
@@ -440,8 +522,8 @@ def main(argv: list[str] | None = None) -> int:
                              "same source: keep-first (default; re-ingest is a no-op) or "
                              "refresh (replace the matched ledger row, then recompute the "
                              "arrow). Overrides PG_REPEAT_MODE.")
-    ingest.set_defaults(handler=lambda: ingest_command(Settings.from_env(), args.path, yes=args.yes,
-                                                       repeat_mode=args.repeat_mode))
+    ingest.set_defaults(handler=lambda a: ingest_command(Settings.from_env(), a.path, yes=a.yes,
+                                                       repeat_mode=a.repeat_mode))
     migrate = subparsers.add_parser(
         "migrate-ledger",
         help="backfill one :ExtractionEvent ledger row per existing typed edge (ADR-0002)",
@@ -491,7 +573,7 @@ def main(argv: list[str] | None = None) -> int:
         help=":Source node id — the source_ref prefix before the first colon, e.g. book-1",
     )
     provenance.set_defaults(
-        handler=lambda: provenance_command(Settings.from_env(), args.source_id))
+        handler=lambda a: provenance_command(Settings.from_env(), a.source_id))
     normalize = subparsers.add_parser(
         "normalize-relations",
         help="re-canonicalize ledger relations through the relation registry (ADR-0003)",
@@ -511,11 +593,52 @@ def main(argv: list[str] | None = None) -> int:
     normalize.set_defaults(
         handler=lambda: normalize_relations_command(Settings.from_env())
     )
+    factcheck = subparsers.add_parser(
+        "fact-check",
+        help="decide-mode fact-checking over ledger rows (ADR-0005)",
+        description=(
+            "Fact-check ledger rows (PRD #76 slice 4, ADR-0005): for every row "
+            "in a domain (--domain) or claimed by a source (--source), a "
+            "web-search-grounded verdict LLM produces support / refute / "
+            "unclear verdicts with confidence, evidence URLs, and model + "
+            "search provenance, stored as append-only :Verdict nodes CHECKS-"
+            "wired to the rows. Rows and arrows are never mutated — verdicts "
+            "inform, a human decides. Re-runs append fresh verdicts; per-source "
+            "walking rides the :Source layer."
+        ),
+    )
+    group = factcheck.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--domain",
+        help="check every ledger row carrying this domain tag",
+    )
+    group.add_argument(
+        "--source",
+        help="check every ledger row claimed by this source id",
+    )
+    factcheck.set_defaults(
+        handler=lambda args: fact_check_command(
+            Settings.from_env(), domain=args.domain, source=args.source)
+    )
+    for sub in (check, init, query, ingest, migrate, backfill, provenance,
+                normalize, factcheck):
+        handler = sub._defaults.get("handler")
+        if handler is not None:
+            params = len(inspect.signature(handler).parameters)
+            if params == 0:
+                sub.set_defaults(handler=lambda a, h=handler: h())
+            else:
+                sub.set_defaults(handler=handler)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
         return 0
-    return args.handler()
+    return args.handler(args)
 
 
 if __name__ == "__main__":

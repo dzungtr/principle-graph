@@ -34,3 +34,10 @@ ON (event.source_ref);
 CREATE RANGE INDEX source_id IF NOT EXISTS
 FOR (source:Source)
 ON (source.id);
+
+// Fact-check verdicts (ADR-0005): append-only receipt nodes wired CHECKS to the
+// rows they judge. Verdict ids are generated per write (one node per run, per
+// row) so re-runs append; this index supports per-source/per-row verdict walks.
+CREATE RANGE INDEX verdict_id IF NOT EXISTS
+FOR (verdict:Verdict)
+ON (verdict.id);
