@@ -5,6 +5,7 @@ import argparse
 import importlib.resources
 import inspect
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from .fanout import query_directions, render_markdown
 from .ledger import resolve_repeat_mode
 from .llm_gateway import OpenAICompatibleMessagesClient
 from .neo4j import Neo4jEntityStore, Neo4jGraphWriter, load_existing_edges
+from .novelty import NoveltyFilter
 from .orchestrator import IngestOrchestrator
 from .resolution import Entity
 
@@ -204,7 +206,8 @@ def preflight(settings: Settings) -> None:
         )
 
 
-def build_orchestrator(settings: Settings, repeat_mode: str | None = None) -> tuple[IngestOrchestrator, object]:
+def build_orchestrator(settings: Settings, repeat_mode: str | None = None,
+                       novelty_filter: "NoveltyFilter | None" = None) -> tuple[IngestOrchestrator, object]:
     """Compose the orchestrator over the real-backend seams for `pg ingest`.
 
     ``repeat_mode`` overrides ``settings.repeat_mode`` when given; the effective
@@ -230,6 +233,7 @@ def build_orchestrator(settings: Settings, repeat_mode: str | None = None) -> tu
         writer=writer,
         edge_loader=_EdgeLoaderAdapter(driver, settings.database),
         rejected_log_path=settings.rejected_log_path,
+        novelty_filter=novelty_filter,
     )
     return orchestrator, driver
 
@@ -285,6 +289,17 @@ class _EdgeLoaderAdapter:
         return load_existing_edges(self._driver, triples, self._database)
 
 
+def _novelty_filter_for(settings: Settings, no_novelty_filter: bool):
+    """Construct the Jev client for the default always-on gate; ``None`` when opted out."""
+    if no_novelty_filter:
+        return None
+    from .novelty import JevDecisionsClient
+    return JevDecisionsClient(
+        base_url=settings.jev_base_url, model=settings.jev_model,
+        api_key=os.getenv("OPENROUTER_API_KEY", ""), timeout=settings.jev_timeout,
+    )
+
+
 def ingest_command(
     settings: Settings,
     source_path: str,
@@ -293,6 +308,7 @@ def ingest_command(
     input_fn: Callable[[str], str] | None = None,
     out=sys.stdout,
     repeat_mode: str | None = None,
+    no_novelty_filter: bool = False,
 ) -> int:
     """Pre-flight, run the orchestrator, and emit the end-of-run stats block.
 
@@ -318,13 +334,24 @@ def ingest_command(
     if not path.exists():
         print(f"Source not found: {source_path}", file=sys.stderr)
         return 2
+    # ADR-0006 decision 4/6: the gate is always-on, so the Decisions API key is
+    # required unless explicitly opted out. Fail before any pre-flight spend.
+    if not no_novelty_filter and not os.getenv("OPENROUTER_API_KEY"):
+        print(
+            "Novelty filter is enabled but OPENROUTER_API_KEY is unset; "
+            "set it or pass --no-novelty-filter to opt out.",
+            file=sys.stderr,
+        )
+        return 2
     try:
         preflight(settings)
     except PreflightError as error:
         print(f"Ingest pre-flight failed: {error}", file=sys.stderr)
         print(f"Hint: {error.remediation}", file=sys.stderr)
         return 1
-    orchestrator, driver = build_orchestrator(settings, repeat_mode=effective_mode)
+    orchestrator, driver = build_orchestrator(
+        settings, repeat_mode=effective_mode,
+        novelty_filter=_novelty_filter_for(settings, no_novelty_filter))
     if input_fn is not None:
         review_input: Callable[[str], str] = input_fn
     elif yes:
@@ -525,8 +552,13 @@ def build_parser() -> argparse.ArgumentParser:
                              "same source: keep-first (default; re-ingest is a no-op) or "
                              "refresh (replace the matched ledger row, then recompute the "
                              "arrow). Overrides PG_REPEAT_MODE.")
+    ingest.add_argument("--no-novelty-filter", action="store_true",
+                        help="skip the Jev novelty gate (ADR-0006) for bulk "
+                             "re-ingests and backfills; default gate requires "
+                             "OPENROUTER_API_KEY")
     ingest.set_defaults(handler=lambda a: ingest_command(Settings.from_env(), a.path, yes=a.yes,
-                                                       repeat_mode=a.repeat_mode))
+                                                       repeat_mode=a.repeat_mode,
+                                                       no_novelty_filter=a.no_novelty_filter))
     migrate = subparsers.add_parser(
         "migrate-ledger",
         help="backfill one :ExtractionEvent ledger row per existing typed edge (ADR-0002)",

@@ -14,10 +14,11 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .extraction import ExtractionRun, SequentialExtractor
 from .extraction_contract import Chunk, chunk_markdown, chunk_pdf
+from .novelty import NoveltyFilter, apply_novelty_filter
 from .reduction import GraphEdge, GraphEntity, GraphWriter, InMemoryGraph, assemble_delta, commit_delta
 from .resolution import AmbiguityItem, EntityResolver, Resolution, SessionRegistry
 from .review import GraphDelta, ReviewResult, review_and_commit
@@ -65,6 +66,11 @@ class IngestStats:
     # Slice #78: unknown domains passed through at the write boundary, per-domain
     # occurrence counts; empty when all domains canonicalized or untracked.
     unknown_domains: tuple[tuple[str, int], ...] = ()
+    # ADR-0006 novelty gate aggregates; zeroed when the filter is opted out.
+    novelty_calls: int = 0
+    filtered_noise: int = 0
+    filtered_common_sense: int = 0
+    novelty_mean_probabilities: Mapping[str, float] = field(default_factory=dict)
 
     def render(self) -> str:
         committed_lines = [
@@ -96,6 +102,14 @@ class IngestStats:
                 f"{name}={count}" for name, count in self.unknown_domains)
             committed_lines.append(
                 f"unknown domains passed through uncanonicalized: {unknown_domains}")
+        if self.novelty_calls or self.filtered_noise or self.filtered_common_sense:
+            committed_lines.append(
+                f"filtered items: {self.filtered_noise + self.filtered_common_sense} "
+                f"(noise={self.filtered_noise}, common_sense={self.filtered_common_sense})")
+            means = ", ".join(f"{key}={value:.2f}" for key, value in
+                               sorted(self.novelty_mean_probabilities.items()))
+            committed_lines.append(
+                f"novelty calls: {self.novelty_calls}; mean probabilities: {means or '(none)'}")
         committed_lines.append(
             f"elapsed seconds: {self.elapsed_seconds:.3f}",
         )
@@ -134,6 +148,7 @@ class IngestOrchestrator:
         writer: GraphWriter,
         edge_loader: ExistingEdgeLoader | None = None,
         rejected_log_path: str = ".pg/rejected.jsonl",
+        novelty_filter: "NoveltyFilter | None" = None,
     ) -> None:
         self.extractor = extractor
         self.store = store
@@ -141,6 +156,7 @@ class IngestOrchestrator:
         self.writer = writer
         self.edge_loader = edge_loader
         self.rejected_log_path = rejected_log_path
+        self.novelty_filter = novelty_filter
 
     def run(
         self,
@@ -151,6 +167,12 @@ class IngestOrchestrator:
         started = monotonic()
         chunk_list, source_id = load_source(source_path)
         run = self._extract(chunk_list)
+        # ADR-0006 novelty gate: after extract, before resolve. ``None`` (opt-out)
+        # keeps the current behavior with zero Jev calls. A filter failure raises
+        # out of ``run`` — the ingest aborts with no partial state.
+        novelty = None
+        if self.novelty_filter is not None:
+            run.candidates, novelty = apply_novelty_filter(run.candidates, self.novelty_filter)
         resolution = self._resolve(run, source_id)
         triples = self._candidate_triples(run, resolution)
         existing: list[GraphEdge] = []
@@ -190,6 +212,10 @@ class IngestOrchestrator:
             unknown_domains=tuple(
                 sorted(getattr(self.writer, "unknown_domain_counts", {}).items())
             ),
+            novelty_calls=(novelty.novelty_calls if novelty else 0),
+            filtered_noise=(novelty.filtered_noise if novelty else 0),
+            filtered_common_sense=(novelty.filtered_common_sense if novelty else 0),
+            novelty_mean_probabilities=(dict(novelty.mean_probabilities) if novelty else {}),
         )
         return IngestResult(stats=stats, delta=delta, review=review, graph=self.writer)
 
@@ -318,6 +344,7 @@ __all__ = [
     "IngestOrchestrator",
     "IngestResult",
     "IngestStats",
+    "NoveltyFilter",
     "format_ambiguity_note",
     "load_source",
     "normalize_candidate",

@@ -191,6 +191,15 @@ def test_preflight_passes_when_schema_present(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _novelty_gate_off(monkeypatch):
+    """Issue #93 tests here exercise non-novelty surfaces; opt the gate out and
+    keep the key check deterministic regardless of the ambient environment."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr("principle_graph.cli._novelty_filter_for",
+                        lambda settings, no_novelty_filter: None)
+
+
 class _FakeStats:
     def __init__(self, verdict: str) -> None:
         self.verdict = verdict
@@ -232,7 +241,7 @@ def test_ingest_command_exit_zero_on_approved(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("principle_graph.cli.preflight", lambda _s: None)
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s, repeat_mode=None: (_FakeOrchestrator("approved"), _FakeWriter()),
+        lambda _s, repeat_mode=None, novelty_filter=None: (_FakeOrchestrator("approved"), _FakeWriter()),
     )
     out = io.StringIO()
     with redirect_stdout(out):
@@ -248,7 +257,7 @@ def test_ingest_command_exit_nonzero_on_rejected(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("principle_graph.cli.preflight", lambda _s: None)
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s, repeat_mode=None: (_FakeOrchestrator("rejected"), _FakeWriter()),
+        lambda _s, repeat_mode=None, novelty_filter=None: (_FakeOrchestrator("rejected"), _FakeWriter()),
     )
     out, err = io.StringIO(), io.StringIO()
     with redirect_stdout(out), redirect_stderr(err):
@@ -270,7 +279,7 @@ def test_ingest_command_passes_input_fn_through_to_orchestrator(monkeypatch, tmp
     orchestrator = _FakeOrchestrator("approved")
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s, repeat_mode=None: (orchestrator, _FakeWriter()),
+        lambda _s, repeat_mode=None, novelty_filter=None: (orchestrator, _FakeWriter()),
     )
 
     def scripted(_prompt: str) -> str:
@@ -298,7 +307,7 @@ def test_ingest_command_defaults_to_interactive_review(monkeypatch, tmp_path: Pa
     orchestrator = _FakeOrchestrator("approved")
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s, repeat_mode=None: (orchestrator, _FakeWriter()),
+        lambda _s, repeat_mode=None, novelty_filter=None: (orchestrator, _FakeWriter()),
     )
     out = io.StringIO()
     with redirect_stdout(out):
@@ -317,7 +326,7 @@ def test_ingest_command_yes_opts_into_scripted_approval(monkeypatch, tmp_path: P
     orchestrator = _FakeOrchestrator("approved")
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s, repeat_mode=None: (orchestrator, _FakeWriter()),
+        lambda _s, repeat_mode=None, novelty_filter=None: (orchestrator, _FakeWriter()),
     )
     out = io.StringIO()
     with redirect_stdout(out):
@@ -345,19 +354,22 @@ def test_main_ingest_wires_yes_flag(monkeypatch, tmp_path: Path):
     captured: dict[str, object] = {}
 
     def _fake_ingest(settings, path, *, yes=False, input_fn=None, out=None,
-                     repeat_mode=None):
+                     repeat_mode=None, no_novelty_filter=False):
         captured["yes"] = yes
         captured["path"] = path
         captured["repeat_mode"] = repeat_mode
+        captured["no_novelty_filter"] = no_novelty_filter
         return 0
 
     monkeypatch.setattr("principle_graph.cli.ingest_command", _fake_ingest)
     source = tmp_path / "demo.md"
     source.write_text("# Demo", encoding="utf-8")
     assert main(["ingest", str(source)]) == 0
-    assert captured == {"yes": False, "path": str(source), "repeat_mode": None}
+    assert captured["yes"] is False and captured["repeat_mode"] is None
     assert main(["ingest", str(source), "--yes"]) == 0
-    assert captured == {"yes": True, "path": str(source), "repeat_mode": None}
+    assert captured["yes"] is True
+    assert main(["ingest", str(source), "--no-novelty-filter"]) == 0
+    assert captured["no_novelty_filter"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +454,7 @@ def test_ingest_command_flag_overrides_env(monkeypatch, tmp_path: Path):
     received: list[str | None] = []
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s, repeat_mode=None: received.append(repeat_mode)
+        lambda _s, repeat_mode=None, novelty_filter=None: received.append(repeat_mode)
         or (_FakeOrchestrator("approved"), _FakeWriter()),
     )
     with redirect_stdout(io.StringIO()):
@@ -461,7 +473,7 @@ def test_ingest_command_env_mode_flows_to_writer_when_flag_absent(monkeypatch, t
     received: list[str | None] = []
     monkeypatch.setattr(
         "principle_graph.cli.build_orchestrator",
-        lambda _s, repeat_mode=None: received.append(repeat_mode)
+        lambda _s, repeat_mode=None, novelty_filter=None: received.append(repeat_mode)
         or (_FakeOrchestrator("approved"), _FakeWriter()),
     )
     with redirect_stdout(io.StringIO()):
@@ -540,7 +552,7 @@ def test_ingest_notice_uses_approved_edges_not_pre_review_delta(monkeypatch, tmp
     monkeypatch.setattr(cli, "preflight", lambda _s: None)
     monkeypatch.setattr(
         cli, "build_orchestrator",
-        lambda _s, repeat_mode=None: (_FakeOrchestrator(), _FakeWriter()))
+        lambda _s, repeat_mode=None, novelty_filter=None: (_FakeOrchestrator(), _FakeWriter()))
     settings = _settings()
     source = tmp_path / "demo.md"
     source.write_text("# Demo\n\nbody", encoding="utf-8")
@@ -577,7 +589,7 @@ def test_ingest_notice_fires_for_approved_domain_rows(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "preflight", lambda _s: None)
     monkeypatch.setattr(
-        cli, "build_orchestrator", lambda _s, repeat_mode=None: (_Orch(), _FakeWriter()))
+        cli, "build_orchestrator", lambda _s, repeat_mode=None, novelty_filter=None: (_Orch(), _FakeWriter()))
     settings = _settings()
     source = tmp_path / "demo.md"
     source.write_text("# Demo\n\nbody", encoding="utf-8")
