@@ -21,6 +21,10 @@ A section-scoped slice of a source, processed sequentially so later chunks can l
 One proposed relationship grounded in exactly one chunk, with its own confidence, evidence, scope conditions, and source reference.
 _Avoid_: Fact, observation
 
+**Novelty filter**:
+A pre-resolution gate in ingest that challenges each unique proposed relationship against what an educated reader already knows, classifying it noise, common sense, or novel. Noise and common-sense proposals are dropped before entity resolution; only novel proposals enter the graph.
+_Avoid_: Dedup, truth check, fact-checker
+
 **Entity**:
 A typed node identified by name and type — the only identity in the graph.
 _Avoid_: Concept, node, term
