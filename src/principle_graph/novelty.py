@@ -70,14 +70,6 @@ class NoveltyStats:
     filtered_common_sense: int = 0
     mean_probabilities: Mapping[str, float] = field(default_factory=dict)
 
-    def render(self) -> str:
-        means = ", ".join(f"{key}={value:.2f}"
-                          for key, value in sorted(self.mean_probabilities.items()))
-        return (f"filtered items: {self.filtered_noise + self.filtered_common_sense} "
-                f"(noise={self.filtered_noise}, common_sense={self.filtered_common_sense})\n"
-                f"novelty calls: {self.novelty_calls}\n"
-                f"mean probabilities: {means or '(none)'}")
-
 
 class NoveltyFilter(Protocol):
     def classify(self, claims: Sequence[Mapping[str, Any]]) -> list[NoveltyVerdict]: ...

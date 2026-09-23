@@ -133,12 +133,15 @@ def test_stats_counts_and_mean_probabilities():
 
 
 def test_stats_render_in_transcript():
+    # NoveltyStats had its own render(); it was dead in production — the
+    # transcript renders via IngestStats.render (covered by
+    # test_orchestrator_applies_filter_between_extract_and_resolve). Cover the
+    # aggregate itself instead, through apply_novelty_filter's return value.
     transport = _FakeTransport([_decision_body(choice="noise")])
     client = JevDecisionsClient(api_key="k", transport=transport)
     _, stats = apply_novelty_filter([_candidate()], client)
-    text = stats.render()
-    assert "filtered items: 1 (noise=1, common_sense=0)" in text
-    assert "novelty calls: 1" in text
+    assert stats.novelty_calls == 1
+    assert stats.filtered_noise == 1 and stats.filtered_common_sense == 0
 
 
 # --- decision 4: hard abort ------------------------------------------------
@@ -285,6 +288,12 @@ def test_orchestrator_applies_filter_between_extract_and_resolve(monkeypatch, tm
     assert seen_names == ["TCP", "Postel's Law"]
     assert result.stats.filtered_noise == 1
     assert len(result.delta.new_edges) == 1
+    # decision 7: aggregates render through the production seam (IngestStats.render,
+    # called from cli.py). Means: novel=(0.9+0.1)/2, common_sense=(0.05+0.1)/2,
+    # noise=(0.05+0.8)/2.
+    transcript = result.stats.render()
+    assert "filtered items: 1 (noise=1, common_sense=0)" in transcript
+    assert "mean probabilities:" in transcript
 
 
 # --- config surface ---------------------------------------------------------
