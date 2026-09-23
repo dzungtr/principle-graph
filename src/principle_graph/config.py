@@ -34,6 +34,10 @@ class Settings:
     # (default) or refresh. Validated by ledger.resolve_repeat_mode at the
     # write boundary; invalid PG_REPEAT_MODE fails fast on `pg ingest`.
     repeat_mode: str = "keep-first"
+    # ADR-0006 novelty gate: pinned Jev model via the OpenRouter Decisions API.
+    jev_base_url: str = "https://openrouter.ai/api/alpha/decisions"
+    jev_model: str = "typesafe/jev-1.13"
+    jev_timeout: float = 10.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -49,4 +53,7 @@ class Settings:
             query_seed_similarity=_env_float("PG_QUERY_SEED_SIMILARITY", cls.query_seed_similarity),
             rejected_log_path=os.getenv("PG_REJECTED_LOG_PATH", cls.rejected_log_path),
             repeat_mode=os.getenv("PG_REPEAT_MODE", cls.repeat_mode),
+            jev_base_url=os.getenv("PG_JEV_BASE_URL", cls.jev_base_url),
+            jev_model=os.getenv("PG_JEV_MODEL", cls.jev_model),
+            jev_timeout=float(os.getenv("PG_JEV_TIMEOUT", cls.jev_timeout)),
         )
