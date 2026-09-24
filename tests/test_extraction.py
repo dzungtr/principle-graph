@@ -123,7 +123,7 @@ def test_token_ceiling_unchanged_while_decomposing_multi_actor_claim():
     run = SequentialExtractor(client).run(chunks)
     assert [c["subject"] for c in run.candidates] == ["France", "Canada"]
     assert {c["evidence"] for c in run.candidates} == {evidence}
-    assert client.calls[0]["max_tokens"] == 4096
+    assert client.calls[0]["max_tokens"] == 16384
 
 
 # --- Domain tag in the tool contract (issue #78) ---

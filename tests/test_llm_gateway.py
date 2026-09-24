@@ -15,6 +15,17 @@ def test_translates_request_and_tool_calls():
     assert response.content[0].input == {"subject": "rates"}
 
 
+def test_translates_forced_tool_choice_to_openai_shape():
+    seen = {}
+    def transport(url, headers, body, timeout):
+        seen.update(body=json.loads(body))
+        return json.dumps({"choices": [{"message": {"content": None, "tool_calls": [{"function": {"name": "scan_candidates", "arguments": "{}"}}]}}]}).encode()
+    client = OpenAICompatibleMessagesClient("http://gateway", model="m", transport=transport)
+    response = client.create(model="m", tool_choice={"type": "tool", "name": "scan_candidates"})
+    assert seen["body"]["tool_choice"] == {"type": "function", "function": {"name": "scan_candidates"}}
+    assert response.content[0].name == "scan_candidates"
+
+
 def test_empty_tool_calls_and_bad_gateway_errors():
     client = OpenAICompatibleMessagesClient("http://gateway", transport=lambda *args: b'{"choices":[{"message":{"content":"ok"}}]}')
     assert client.create().content == []

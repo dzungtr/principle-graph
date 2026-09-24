@@ -83,10 +83,15 @@ class OpenAICompatibleMessagesClient:
 
     @staticmethod
     def _tool_choice(choice: Any) -> Any:
-        if isinstance(choice, Mapping) and choice.get("type") == "auto":
-            return "auto"
-        if isinstance(choice, Mapping) and choice.get("type") == "any":
-            return "required"
+        if isinstance(choice, Mapping):
+            if choice.get("type") == "auto":
+                return "auto"
+            if choice.get("type") == "any":
+                return "required"
+            # Anthropic's forced-tool shape maps to the OpenAI function shape;
+            # the Anthropic dict passed through verbatim is not valid OpenAI.
+            if choice.get("type") == "tool" and isinstance(choice.get("name"), str):
+                return {"type": "function", "function": {"name": choice["name"]}}
         return choice
 
     @staticmethod

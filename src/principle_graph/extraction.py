@@ -120,7 +120,7 @@ class SequentialExtractor:
             response = self.client.create(
                 model=self.model,
                 system=self.system,
-                max_tokens=4096,
+                max_tokens=16384,
                 tools=[PROPOSE_TRIPLE_TOOL, PROPOSE_STATE_TOOL],
                 tool_choice={"type": "auto"},
                 messages=[{"role": "user", "content": self._chunk_prompt(
