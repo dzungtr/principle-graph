@@ -258,6 +258,40 @@ def _build_embedder(settings: Settings):
         return None
 
 
+def reset_command(settings: Settings, yes: bool, out=sys.stdout) -> int:
+    """Delete every node and relationship in the graph (issue #97).
+
+    Destructive and intentionally coarse: `pg reset` clears the whole graph so
+    re-ingesting a demo corpus needs no ad-hoc Cypher. It only ever runs
+    behind the explicit ``--yes`` confirmation flag.
+    """
+    if not yes:
+        print(
+            "Refusing to reset: this deletes every node and relationship. "
+            "Re-run with --yes to confirm.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        driver = _driver(settings)
+        try:
+            with driver.session(database=settings.database) as session:
+                summary = session.run("MATCH (n) DETACH DELETE n").consume()
+                counters = summary.counters
+        finally:
+            driver.close()
+    except Exception as error:  # CLI should provide a useful failure without a traceback.
+        print(f"Graph reset failed: {error}", file=sys.stderr)
+        return 1
+    print(
+        "Graph reset complete: "
+        f"nodes_deleted={counters.nodes_deleted}, "
+        f"relationships_deleted={counters.relationships_deleted}",
+        file=out,
+    )
+    return 0
+
+
 def _interactive_input(prompt: str) -> str:
     """Terminal input for the default interactive Mode-2 review.
 
@@ -655,8 +689,27 @@ def build_parser() -> argparse.ArgumentParser:
         handler=lambda args: fact_check_command(
             Settings.from_env(), domain=args.domain, source=args.source)
     )
+    reset = subparsers.add_parser(
+        "reset",
+        help="delete all nodes and relationships (destructive; issue #97)",
+        description=(
+            "Delete every node and relationship in the graph (PRD #95 story "
+            "25): resetting a demo corpus becomes one command instead of "
+            "ad-hoc Cypher. Destructive: the whole graph is cleared, nothing "
+            "is archived. Only runs behind the --yes confirmation flag; "
+            "without it the command refuses and changes no state."
+        ),
+    )
+    reset.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm the destructive delete of all nodes and relationships",
+    )
+    reset.set_defaults(
+        handler=lambda args: reset_command(Settings.from_env(), yes=args.yes)
+    )
     for sub in (check, init, query, ingest, migrate, backfill, provenance,
-                normalize, factcheck):
+                normalize, factcheck, reset):
         handler = sub._defaults.get("handler")
         if handler is not None:
             params = len(inspect.signature(handler).parameters)
