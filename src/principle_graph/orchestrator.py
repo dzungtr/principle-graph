@@ -56,6 +56,8 @@ class EntityStore(Protocol):
     def find_entities(self, name: str, entity_type: str) -> Sequence[Any]: ...
     def search_similar(self, embedding: Sequence[float], entity_type: str, limit: int = 10) -> Sequence[Any]: ...
     def structural_corroboration(self, entity: Any, neighbors: Sequence[tuple[str, str]]) -> Any: ...
+    # Issue #102: live-graph verb inventory for scan consolidation.
+    def list_relation_types(self) -> Sequence[str]: ...
 
 
 class ExistingEdgeLoader(Protocol):
@@ -101,6 +103,10 @@ class IngestStats:
     # Unknown state keys passed through uncanonicalized (never-reject stance),
     # per-key occurrence counts; empty when all keys canonicalized.
     unknown_state_keys: tuple[tuple[str, int], ...] = ()
+    # Issue #102 two-pass scan: batched scan calls + the one clustering
+    # consolidation call; zeroed when no scanner is wired.
+    scan_calls: int = 0
+    consolidation_calls: int = 0
     # Issue #101 mis-shape dispatch: guards classify, Jev decides, pipeline
     # executes. Zeroed when the dispatcher is opted out.
     dispatch_calls: int = 0
@@ -164,6 +170,10 @@ class IngestStats:
             unknown = ", ".join(f"{key}={count}" for key, count in self.unknown_state_keys)
             committed_lines.append(
                 f"unknown state keys passed through uncanonicalized: {unknown}")
+        if self.scan_calls or self.consolidation_calls:
+            committed_lines.append(
+                f"scan calls: {self.scan_calls} "
+                f"(consolidation calls: {self.consolidation_calls})")
         if self.dispatch_calls or self.dispatch_bypassed or self.dispatch_dropped \
                 or self.dispatch_flagged_notes:
             steps = ", ".join(f"{step}={count}"
@@ -216,6 +226,7 @@ class IngestOrchestrator:
         novelty_filter: "NoveltyFilter | None" = None,
         state_registry: "Any | None" = None,
         entity_registry: "LabelRegistry | None" = None,
+        scanner: "Any | None" = None,
         dispatcher: "Dispatcher | None" = None,
     ) -> None:
         self.extractor = extractor
@@ -231,6 +242,11 @@ class IngestOrchestrator:
         self._unknown_state_key_counts: dict[str, int] = {}
         # Issue #99: entity-type registry applied before matching.
         self.entity_registry = entity_registry
+        # Issue #102: optional two-pass scan seam; when present, run() scans
+        # before extraction and injects the verb menu + entity roster into
+        # every chunk prompt. A scan failure raises out of run() — the ingest
+        # aborts before any extraction or write (fail-fast, no partial state).
+        self.scanner = scanner
         # Issue #101 mis-shape dispatch: ``None`` opts the seam out entirely
         # (novelty-filter precedent) — guards do not run and nothing dispatches.
         self.dispatcher = dispatcher
@@ -243,7 +259,20 @@ class IngestOrchestrator:
     ) -> IngestResult:
         started = monotonic()
         chunk_list, source_id = load_source(source_path)
-        run = self._extract(chunk_list)
+        # Issue #102 two-pass: scan + consolidate first; the menu and roster
+        # inject into every chunk prompt below. Any scan failure aborts here.
+        scan_calls = consolidation_calls = 0
+        verb_menu: tuple[str, ...] = ()
+        entity_roster: tuple[str, ...] = ()
+        if self.scanner is not None:
+            scan = self.scanner.scan(chunk_list)
+            verb_menu = tuple(scan.verb_menu)
+            entity_roster = tuple(
+                entry.render() if hasattr(entry, "render") else str(entry)
+                for entry in scan.entity_roster)
+            scan_calls = scan.scan_calls
+            consolidation_calls = scan.consolidation_calls
+        run = self._extract(chunk_list, verb_menu=verb_menu, entity_roster=entity_roster)
         # Issue #101 mis-shape dispatch: after extract, before the novelty gate
         # (shaping before admission). Well-formed triples bypass entirely. A
         # dispatcher outage raises DispatchError out of ``run`` — hard abort,
@@ -329,6 +358,8 @@ class IngestOrchestrator:
             states_filtered_common_sense=state_novelty.filtered_common_sense,
             states_committed=states_committed,
             unknown_state_keys=tuple(sorted(self._unknown_state_key_counts.items())),
+            scan_calls=scan_calls,
+            consolidation_calls=consolidation_calls,
             dispatch_calls=dispatch_stats["calls"],
             dispatch_bypassed=dispatch_stats["bypassed"],
             dispatch_dropped=dispatch_stats["dropped"],
@@ -337,8 +368,13 @@ class IngestOrchestrator:
         )
         return IngestResult(stats=stats, delta=delta, review=review, graph=self.writer)
 
-    def _extract(self, chunks: Sequence[Chunk]) -> ExtractionRun:
-        return self.extractor.run(chunks)
+    def _extract(self, chunks: Sequence[Chunk], *, verb_menu: Sequence[str] = (),
+                 entity_roster: Sequence[str] = ()) -> ExtractionRun:
+        # Legacy extraction seams (fakes without scan support) keep the plain
+        # ``run(chunks)`` call shape; kwargs ride only when scan output exists.
+        if not verb_menu and not entity_roster:
+            return self.extractor.run(chunks)
+        return self.extractor.run(chunks, verb_menu=verb_menu, entity_roster=entity_roster)
 
     def _dispatch(self, run: ExtractionRun, chunk_by_ref: Mapping[str, Chunk],
                   stats: dict[str, Any]) -> None:

@@ -236,6 +236,16 @@ def test_entity_store_find_entities_uses_parameterized_cypher():
     assert params == {"name": "Marie Curie", "type": "Person"}
 
 
+def test_entity_store_list_relation_types_returns_distinct_sorted_types():
+    driver = RecordingDriver([{"relType": "REDUCES"}, {"relType": "BOOSTS"}])
+    store = Neo4jEntityStore(driver)
+    assert store.list_relation_types() == ("REDUCES", "BOOSTS")
+    (session,) = driver.sessions
+    [(query, params)] = session.queries
+    assert query == "MATCH ()-[r]->() RETURN DISTINCT type(r) AS relType ORDER BY relType"
+    assert params == {}
+
+
 def test_entity_store_search_similar_uses_vector_index_with_type_and_limit():
     driver = RecordingDriver()
     store = Neo4jEntityStore(driver)

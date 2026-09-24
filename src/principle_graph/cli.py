@@ -15,12 +15,17 @@ from .config import Settings
 from .extraction import SequentialExtractor
 from .factcheck import fact_check_notice, fact_check_rows
 from .fanout import query_directions, render_markdown, seed_states
-from .label_registry import default_entity_registry_path, load_label_registry
+from .label_registry import (
+    default_entity_registry_path,
+    default_registry_path,
+    load_label_registry,
+)
 from .ledger import resolve_repeat_mode
 from .llm_gateway import OpenAICompatibleMessagesClient
 from .neo4j import Neo4jEntityStore, Neo4jGraphWriter, load_existing_edges
 from .novelty import NoveltyFilter
 from .orchestrator import IngestOrchestrator
+from .scan import SourceScanner
 from .resolution import Entity
 
 # Schema DDL ships as package data so it resolves in any install layout
@@ -243,6 +248,18 @@ def build_orchestrator(settings: Settings, repeat_mode: str | None = None,
         api_key="local-placeholder",
     )
     extractor = SequentialExtractor(client=messages, model=settings.llm_model)
+    # Issue #102 two-pass scan: one scanner over the same LLM seam, the
+    # relation registry (its staging section is the auto-append target), the
+    # entity-type registry, and the live-graph store seam.
+    scanner = SourceScanner(
+        client=messages,
+        relation_registry=load_label_registry(default_registry_path()),
+        store=store,
+        embedder=embedder,
+        entity_registry=entity_registry,
+        registry_path=default_registry_path(),
+        model=settings.llm_model,
+    )
     orchestrator = IngestOrchestrator(
         extractor=extractor,
         store=store,
@@ -253,6 +270,7 @@ def build_orchestrator(settings: Settings, repeat_mode: str | None = None,
         novelty_filter=novelty_filter,
         entity_registry=entity_registry,
         dispatcher=_dispatcher_for(settings, no_novelty_filter=False),
+        scanner=scanner,
     )
     return orchestrator, driver
 
