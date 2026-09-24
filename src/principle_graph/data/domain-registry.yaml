@@ -24,6 +24,12 @@ labels:
   politics:
     aliases: [governance, policy]
     description: Power, institutions, and collective decisions.
+  geopolitics:
+    aliases: [international_relations, foreign_policy]
+    description: Power and conflict between states and blocs (issue #96).
+  monetary_policy:
+    aliases: [central_banking, rates_policy]
+    description: Central-bank control of money and credit (issue #96).
   technology:
     aliases: [engineering, computing]
     description: Tools, systems, and their construction.

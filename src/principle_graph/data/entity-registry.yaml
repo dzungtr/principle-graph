@@ -1,0 +1,56 @@
+# Entity-type registry (issue #96): canonical entity types for the write
+# boundary.
+#
+# Loaded by the same generic label-registry loader as the relation registry
+# (ADR-0003); no second registry implementation. Type canonicalization is
+# applied before entity matching (issue #99) so type drift never blocks
+# resolution merges; unknown types pass through flagged, never rejected.
+# Consolidating types is an edit here — no code change.
+#
+# Rules:
+# - keys and aliases are lowercase snake_case (extraction-contract label shape);
+# - `inverse` is not used for entity types — never declare it;
+# - `proposed:` staging follows the relation-registry semantics (issue #96);
+# - unknown types are not listed here — they pass through as-is;
+# - this registry holds the system's language only — never entity identities
+#   (world knowledge lives in the graph per PRD #95).
+version: 1
+labels:
+  person:
+    aliases: [politician, official, leader, individual, chancellor, president, minister]
+    description: A human actor.
+  organization:
+    aliases: [geopolitical_entity, institution, company, agency, central_bank, party, government, bloc]
+    description: A group acting as one actor, including states-as-actors.
+  country:
+    aliases: [nation, nation_state, state]
+    description: A sovereign country.
+  place:
+    aliases: [location, city, region, territory]
+    description: A geographic location.
+  event:
+    aliases: [election, summit, crisis, meeting, war, announcement]
+    description: An event-as-thing (a named happening, not a subject-verb-object sentence).
+  policy:
+    aliases: [tariff, sanction, regulation, stimulus, rule, program]
+    description: A decided course of action by an authority.
+  agreement:
+    aliases: [treaty, deal, pact, accord, contract]
+    description: A mutual commitment between actors.
+  product:
+    aliases: [commodity, good, asset, currency]
+    description: A produced or tradable thing.
+  technology:
+    aliases: [platform, ai_model, system, technique]
+    description: Applied capability or machinery.
+  market:
+    aliases: [sector, asset_class, exchange, industry]
+    description: A trading arena or category.
+  metric:
+    aliases: [indicator, index, rate, ratio]
+    description: A measurement kind (an instance value is state, not an entity).
+  concept:
+    aliases: [idea, doctrine, ideology, narrative, principle, risk]
+    description: An abstract idea or framing.
+proposed:
+  labels: {}
