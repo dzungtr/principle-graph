@@ -21,6 +21,7 @@ from .extraction_contract import Chunk, chunk_markdown, chunk_pdf
 from .novelty import NoveltyFilter, apply_novelty_filter
 from .reduction import GraphEdge, GraphEntity, GraphWriter, InMemoryGraph, assemble_delta, commit_delta
 from .resolution import AmbiguityItem, EntityResolver, Resolution, SessionRegistry
+from .label_registry import LabelRegistry
 from .review import GraphDelta, ReviewResult, review_and_commit
 
 
@@ -66,6 +67,9 @@ class IngestStats:
     # Slice #78: unknown domains passed through at the write boundary, per-domain
     # occurrence counts; empty when all domains canonicalized or untracked.
     unknown_domains: tuple[tuple[str, int], ...] = ()
+    # Issue #99: unknown entity types passed through at the write boundary,
+    # per-type occurrence counts; empty when all types canonicalized/untracked.
+    unknown_entity_types: tuple[tuple[str, int], ...] = ()
     # ADR-0006 novelty gate aggregates; zeroed when the filter is opted out.
     novelty_calls: int = 0
     filtered_noise: int = 0
@@ -102,6 +106,11 @@ class IngestStats:
                 f"{name}={count}" for name, count in self.unknown_domains)
             committed_lines.append(
                 f"unknown domains passed through uncanonicalized: {unknown_domains}")
+        if self.unknown_entity_types:
+            unknown_types = ", ".join(
+                f"{name}={count}" for name, count in self.unknown_entity_types)
+            committed_lines.append(
+                f"unknown entity types passed through uncanonicalized: {unknown_types}")
         if self.novelty_calls or self.filtered_noise or self.filtered_common_sense:
             committed_lines.append(
                 f"filtered items: {self.filtered_noise + self.filtered_common_sense} "
@@ -149,7 +158,7 @@ class IngestOrchestrator:
         edge_loader: ExistingEdgeLoader | None = None,
         rejected_log_path: str = ".pg/rejected.jsonl",
         novelty_filter: "NoveltyFilter | None" = None,
-        entity_registry: Any = None,
+        entity_registry: "LabelRegistry | None" = None,
     ) -> None:
         self.extractor = extractor
         self.store = store
@@ -214,6 +223,9 @@ class IngestOrchestrator:
             ),
             unknown_domains=tuple(
                 sorted(getattr(self.writer, "unknown_domain_counts", {}).items())
+            ),
+            unknown_entity_types=tuple(
+                sorted(getattr(self.writer, "unknown_entity_type_counts", {}).items())
             ),
             novelty_calls=(novelty.novelty_calls if novelty else 0),
             filtered_noise=(novelty.filtered_noise if novelty else 0),
@@ -280,10 +292,14 @@ class IngestOrchestrator:
             o_type = o_resolution.canonical.type
             entity_map[s_name] = GraphEntity(s_name, s_type,
                                               embedding=tuple(s_resolution.canonical.embedding) if s_resolution.canonical.embedding else None,
-                                              aliases=tuple(s_resolution.canonical.aliases))
+                                              aliases=tuple(dict.fromkeys(
+                                                  tuple(s_resolution.canonical.aliases)
+                                                  + s_resolution.new_aliases)))
             entity_map[o_name] = GraphEntity(o_name, o_type,
                                               embedding=tuple(o_resolution.canonical.embedding) if o_resolution.canonical.embedding else None,
-                                              aliases=tuple(o_resolution.canonical.aliases))
+                                              aliases=tuple(dict.fromkeys(
+                                                  tuple(o_resolution.canonical.aliases)
+                                                  + o_resolution.new_aliases)))
             edges.append(GraphEdge(
                 s_name, candidate["relation"].upper(), o_name,
                 candidate["confidence"], candidate["source_ref"],

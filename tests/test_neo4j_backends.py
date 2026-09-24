@@ -230,7 +230,9 @@ def test_entity_store_find_entities_uses_parameterized_cypher():
     store.find_entities("Marie Curie", "Person")
     (session,) = driver.sessions
     [(query, params)] = session.queries
-    assert query == "MATCH (e:Entity {name: $name, type: $type}) RETURN e AS node"
+    assert query == ("MATCH (e:Entity {type: $type}) "
+                     "WHERE e.name = $name OR $name IN coalesce(e.aliases, []) "
+                     "RETURN e AS node")
     assert params == {"name": "Marie Curie", "type": "Person"}
 
 
@@ -597,3 +599,30 @@ def test_unknown_domain_passes_through_flagged():
     writer.upsert_extraction(GraphEdge(
         "c", "supports", "d", 0.5, "s2:c1", ("w",), "", domain="xenosophy"))
     assert writer.unknown_domain_counts == {"xenosophy": 2}
+
+
+def test_entity_store_find_entities_matches_persisted_aliases():
+    """P1 fix: the name-keyed read path consults persisted aliases."""
+    driver = RecordingDriver()
+    store = Neo4jEntityStore(driver)
+    store.find_entities("Merz", "person")
+    (session,) = driver.sessions
+    [(query, params)] = session.queries
+    assert query == ("MATCH (e:Entity {type: $type}) "
+                     "WHERE e.name = $name OR $name IN coalesce(e.aliases, []) "
+                     "RETURN e AS node")
+    assert params == {"name": "Merz", "type": "person"}
+
+
+def test_entity_store_containment_uses_token_list_not_string_param():
+    """P0 fix: containment prefilter compares token lists; never a string param."""
+    driver = RecordingDriver(rows=[{"node": {"name": "Friedrich Merz",
+                                             "type": "person",
+                                             "aliases": ["Merz"]}}])
+    store = Neo4jEntityStore(driver)
+    store.containment_candidates("Merz", "person")
+    (session,) = driver.sessions
+    [(query, params)] = session.queries
+    assert "$name" not in query
+    assert "coalesce(e.aliases, [])" in query
+    assert params == {"type": "person", "tokens": ["merz"]}

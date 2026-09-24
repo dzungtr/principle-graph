@@ -393,3 +393,14 @@ def test_stats_block_omits_unknown_line_when_no_unknowns():
     result = orch.run(path, input_fn=lambda _: "approve")
     assert result.stats.unknown_relations == ()
     assert "unknown relations" not in result.stats.render()
+
+
+def test_stats_block_reports_unknown_entity_types_from_writer():
+    """Issue #99 P2: writer-side unknown entity-type counts reach the transcript."""
+    graph = InMemoryGraph()
+    orch, _, path = _orchestrator(graph)
+    graph.unknown_entity_type_counts = {"xenosophy": 2}
+    result = orch.run(path, input_fn=lambda _: "approve")
+    transcript = result.stats.render()
+    assert result.stats.unknown_entity_types == (("xenosophy", 2),)
+    assert "unknown entity types passed through uncanonicalized: xenosophy=2" in transcript

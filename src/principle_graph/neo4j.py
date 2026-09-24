@@ -865,7 +865,11 @@ class Neo4jEntityStore:
         self.database = database
 
     def find_entities(self, name: str, entity_type: str) -> Sequence[Entity]:
-        query = "MATCH (e:Entity {name: $name, type: $type}) RETURN e AS node"
+        # Issue #99 P1: persisted aliases are consulted, so a recorded surface
+        # form resolves on a later ingest without vector corroboration (AC-3).
+        query = ("MATCH (e:Entity {type: $type}) "
+                 "WHERE e.name = $name OR $name IN coalesce(e.aliases, []) "
+                 "RETURN e AS node")
         with self.driver.session(database=self.database) as session:
             return [_entity(row["node"]) for row in session.run(query, name=name, type=entity_type)]
 
@@ -894,15 +898,18 @@ class Neo4jEntityStore:
     # query only narrows the candidate set (shared token or token inside name).
     def containment_candidates(self, name: str, entity_type: str) -> Sequence[Entity]:
         tokens = [t for t in normalize_name(name).split() if t]
+        # Issue #99 P0/P1: token LIST params (a bare string crashes Cypher's
+        # `t IN $param`), and persisted aliases join the name tokens on both
+        # sides so alias rows surface in the prefilter too.
         query = (
             "MATCH (e:Entity {type: $type}) "
-            "WHERE any(t IN $tokens WHERE t IN split(toLower(e.name), ' ')) "
-            "OR any(t IN split(toLower(e.name), ' ') WHERE t IN $name) "
+            "WHERE any(t IN $tokens WHERE t IN split(toLower(e.name), ' ') + coalesce(e.aliases, [])) "
+            "OR any(t IN split(toLower(e.name), ' ') + coalesce(e.aliases, []) WHERE t IN $tokens) "
             "RETURN e AS node LIMIT 100"
         )
         with self.driver.session(database=self.database) as session:
             return [_entity(row["node"]) for row in session.run(
-                query, type=entity_type, tokens=tokens, name=normalize_name(name))]
+                query, type=entity_type, tokens=tokens)]
 
     def add_alias(self, entity: Entity, alias: str) -> None:
         query = (

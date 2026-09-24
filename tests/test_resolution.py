@@ -1,4 +1,4 @@
-from principle_graph.resolution import Entity, EntityResolver, SessionRegistry, SimilarEntity
+from principle_graph.resolution import Entity, EntityResolver, SessionRegistry, SimilarEntity, normalize_name
 
 import math
 
@@ -220,3 +220,38 @@ def test_exact_name_match_does_not_reaccumulate_alias():
     resolver = EntityResolver(store)
     resolver.resolve("Federal Reserve", "organization")
     assert store.alias_calls == []
+
+
+def test_same_run_session_merge_accumulates_alias_on_resolution():
+    """P1 fix: a same-run session merge records the surface form (AC-1/AC-3)."""
+    store = V2Store()
+    registry = SessionRegistry()
+    resolver = EntityResolver(store, registry=registry)
+    first = resolver.resolve("Friedrich Merz", "person", embedding=_unit([1.0, 0.05]))
+    result = resolver.resolve("Merz", "person", embedding=_unit([1.0, 0.0]))
+    assert result.outcome == "auto-resolve" and result.canonical == first.canonical
+    assert result.new_aliases == ("Merz",)
+    assert registry.lookup("Merz", "person") == first.canonical
+
+
+class NameKeyedStore(V2Store):
+    """Store fake keyed like the real seam: name and alias matches only."""
+
+    def __init__(self, nodes=()):
+        super().__init__()
+        self.nodes = list(nodes)
+
+    def find_entities(self, name, entity_type):
+        normalized = normalize_name(name)
+        return [e for e in self.nodes if e.type == entity_type and (
+            normalize_name(e.name) == normalized
+            or any(normalize_name(a) == normalized for a in e.aliases))]
+
+
+def test_persisted_alias_round_trip_on_name_keyed_store():
+    """AC-3: a recorded alias auto-resolves on a later ingest, no corroboration."""
+    merz = Entity("e1", "Friedrich Merz", "person", aliases=("Merz",))
+    resolver = EntityResolver(NameKeyedStore(nodes=[merz]))
+    result = resolver.resolve("Merz", "person")
+    assert result.outcome == "auto-resolve"
+    assert result.canonical == merz

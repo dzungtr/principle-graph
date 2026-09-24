@@ -215,15 +215,15 @@ def build_orchestrator(settings: Settings, repeat_mode: str | None = None,
     value lands on the writer, which validates it before any session opens.
     """
     driver = _driver(settings)
+    entity_registry = load_label_registry(default_entity_registry_path())
     writer = Neo4jGraphWriter(driver, database=settings.database,
                               rejected_log_path=settings.rejected_log_path,
                               repeat_mode=repeat_mode if repeat_mode is not None
-                              else settings.repeat_mode)
+                              else settings.repeat_mode,
+                              entity_registry=entity_registry)
     store = Neo4jEntityStore(driver, database=settings.database)
     # Entity-type registry (issues #96/#99): canonicalization before matching
     # in the resolver and at the entity write boundary share one loaded copy.
-    entity_registry = load_label_registry(default_entity_registry_path())
-    writer.entity_registry = entity_registry
     embedder = _build_embedder(settings)
     messages = OpenAICompatibleMessagesClient(
         base_url=settings.llm_base_url,

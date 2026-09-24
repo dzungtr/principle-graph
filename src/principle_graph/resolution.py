@@ -99,6 +99,10 @@ class Resolution:
     canonical: Entity | None = None
     matches: tuple[ResolutionMatch, ...] = ()
     ambiguity: AmbiguityItem | None = None
+    # Surface forms merged into the canonical identity during this resolution
+    # (issue #99 P1): folded into the assembled GraphEntity so the same-run
+    # upsert persists them even when the canonical Entity snapshot is stale.
+    new_aliases: tuple[str, ...] = ()
 
 
 @dataclass
@@ -180,18 +184,22 @@ class EntityResolver:
                 )
         return canonical
 
-    def _store_add_alias(self, entity: Entity, alias: str) -> None:
-        """Persist a merged surface form on the canonical entity (issue #99)."""
+    def _store_add_alias(self, entity: Entity, alias: str) -> str | None:
+        """Persist a merged surface form on the canonical entity (issue #99).
+
+        Returns the alias when newly recorded, else ``None``.
+        """
         if normalize_name(alias) == normalize_name(entity.name) or any(
             normalize_name(alias) == normalize_name(a) for a in entity.aliases
         ):
-            return
+            return None
         add = getattr(self.store, "add_alias", None)
         if add is not None:
             add(entity, alias)
         # Register the alias in the session too, so later lookups reuse it
         # without another store round-trip.
         self.registry.add_alias(entity, alias)
+        return alias
 
     def resolve(self, candidate: str, raw_entity_type: str, *, embedding: Sequence[float] | None = None,
                 neighbors: Sequence[tuple[str, str]] = (), source_ref: str = "") -> Resolution:
@@ -204,7 +212,9 @@ class EntityResolver:
         # Apply the same thresholds to identities created earlier in this session.
         session_fuzzy = self.registry.fuzzy_matches(candidate, entity_type)
         if len(session_fuzzy) == 1:
-            return Resolution("auto-resolve", candidate, entity_type, session_fuzzy[0].entity, tuple(session_fuzzy))
+            alias = self._store_add_alias(session_fuzzy[0].entity, candidate)
+            return Resolution("auto-resolve", candidate, entity_type, session_fuzzy[0].entity, tuple(session_fuzzy),
+                              new_aliases=(alias,) if alias else ())
         if len(session_fuzzy) > 1:
             return self._queue(candidate, entity_type, source_ref, session_fuzzy)
         if embedding is None and self.embedder is not None:
@@ -212,7 +222,9 @@ class EntityResolver:
         session_semantic = self.registry.semantic_matches(embedding, entity_type) if embedding is not None else []
         if session_semantic:
             if len(session_semantic) == 1 or session_semantic[0].score - session_semantic[1].score >= EMBEDDING_MARGIN:
-                return Resolution("auto-resolve", candidate, entity_type, session_semantic[0].entity, tuple(session_semantic))
+                alias = self._store_add_alias(session_semantic[0].entity, candidate)
+                return Resolution("auto-resolve", candidate, entity_type, session_semantic[0].entity, tuple(session_semantic),
+                                  new_aliases=(alias,) if alias else ())
             return self._queue(candidate, entity_type, source_ref, session_semantic)
 
         exact = list(self.store.find_entities(candidate, entity_type))
@@ -234,8 +246,9 @@ class EntityResolver:
             if score >= NAME_SIMILARITY:
                 fuzzy.append(ResolutionMatch(entity, score, "fuzzy"))
         if len(fuzzy) == 1:
-            self._store_add_alias(fuzzy[0].entity, candidate)
-            return Resolution("auto-resolve", candidate, entity_type, fuzzy[0].entity, tuple(fuzzy))
+            alias = self._store_add_alias(fuzzy[0].entity, candidate)
+            return Resolution("auto-resolve", candidate, entity_type, fuzzy[0].entity, tuple(fuzzy),
+                              new_aliases=(alias,) if alias else ())
         if len(fuzzy) > 1:
             return self._queue(candidate, entity_type, source_ref, sorted(fuzzy, key=lambda m: m.score, reverse=True))
 
@@ -254,10 +267,11 @@ class EntityResolver:
         corroborated = [m for m in contained
                         if m.score >= EMBEDDING_SIMILARITY]
         if len(corroborated) == 1:
-            self._store_add_alias(corroborated[0].entity, candidate)
+            alias = self._store_add_alias(corroborated[0].entity, candidate)
             return Resolution("auto-resolve", candidate, entity_type,
                               corroborated[0].entity, tuple(corroborated +
-                              [m for m in contained if m not in corroborated]))
+                              [m for m in contained if m not in corroborated]),
+                              new_aliases=(alias,) if alias else ())
         if contained:
             return self._queue(candidate, entity_type, source_ref, contained)
 
@@ -268,8 +282,11 @@ class EntityResolver:
             for e in self.registry.containment_entities(candidate, entity_type)]
         session_ok = [m for m in session_contained if m.score >= EMBEDDING_SIMILARITY]
         if len(session_ok) == 1:
+            # P1 fix (issue #99): record the merged surface form on the session
+            # identity so the assembled node carries it (AC-1/AC-3 same-run path).
+            alias = self._store_add_alias(session_ok[0].entity, candidate)
             return Resolution("auto-resolve", candidate, entity_type, session_ok[0].entity,
-                              tuple(session_ok))
+                              tuple(session_ok), new_aliases=(alias,) if alias else ())
         if session_contained:
             return self._queue(candidate, entity_type, source_ref, session_contained)
         semantic: list[ResolutionMatch] = []
