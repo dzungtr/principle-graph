@@ -23,8 +23,6 @@ runnable DDL ships as package data at
 pair may occur only once. Surface-form variants resolved onto this identity accumulate as
 `aliases` (issue #99); resolution consults them during exact and containment matching.
 
-## Nodes
-
 ### `ExtractionEvent`
 
 Ledger row (ADR-0002): one append-only extraction event per accepted extraction, wired

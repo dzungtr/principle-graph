@@ -68,6 +68,20 @@ pg query "interest rates are rising" --top-k 10 --max-edges-per-seed 20
 Run `pg query --help` for all options. Queries require a reachable Neo4j instance
 and data already committed to the graph.
 
+## Reset
+
+`pg reset` deletes every node and relationship in the graph. It is intentionally
+coarse — there is no per-source undo — and only runs behind the explicit `--yes`
+confirmation flag:
+
+```sh
+pg reset --yes
+```
+
+Without `--yes` it refuses and prints a reminder (exit 1). On success it prints
+the deletion counters (`nodes_deleted`, `relationships_deleted`). Use it to
+re-ingest a demo corpus from a clean graph without ad-hoc Cypher.
+
 ## Ingest
 
 `pg ingest <path>` runs the full pipeline (load source by extension, chunk,
@@ -116,6 +130,25 @@ pg ingest path/to/source.md --repeat-mode refresh
 Precedence: the `--repeat-mode` flag overrides the `PG_REPEAT_MODE` env var,
 which overrides the default (`keep-first`). Invalid values fail fast with a
 clear error (exit 2) before any pre-flight or graph write.
+
+### End-of-run transcript
+
+After the review decision, `pg ingest` prints the end-of-run stats transcript.
+Beyond the basics (source, chunks, extraction/embedding request counts,
+ambiguity notes, Mode-2 verdict, committed counts, elapsed seconds) it includes
+the v2 pipeline stages:
+
+- **Scan calls** — `scan calls: N (consolidation calls: M)` from the two-pass
+  scan: N batched inventory calls plus one clustering consolidation call over
+  the unmatched remainder. Omitted when the scan produced nothing or was not run.
+- **Dispatch counts** — `dispatch: N calls, B bypassed, D dropped` with a
+  per-step breakdown (`steps: decompose=2, ...`) and one `flagged:` note per
+  candidate routed to review. `bypassed` are well-formed triples that skipped
+  dispatch entirely; `dropped` were discarded as noise or invalid payloads.
+  Omitted when the dispatcher is opted out (`--no-novelty-filter`, which skips
+  both Jev seams).
+- **State tracking** — `states: N committed; filtered states: ...` plus unknown
+  state keys passed through uncanonicalized (never-reject stance).
 
 ### Source provenance
 
@@ -189,23 +222,8 @@ Run the demo tests only:
 PYTHONPATH=src python -m pytest tests/test_demo.py -v
 ```
 
-## Tests
-
-Run the full suite from the repository root:
-
-```sh
-PYTHONPATH=src python -m pytest -q
-```
-
-Run the demo tests only:
-
-```sh
-PYTHONPATH=src python -m pytest tests/test_demo.py -v
-```
-
 ## Further documentation
 
-- [Demo acceptance walkthrough](docs/demo/acceptance-walkthrough.md)
 - [Neo4j schema](docs/schema/neo4j-schema.md)
 - [Extraction contract](docs/extraction-contract.md)
 - [Fan-out query contract](docs/fanout-query.md)
