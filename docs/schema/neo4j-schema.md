@@ -12,14 +12,15 @@ runnable DDL ships as package data at
 | Property | Type | Required | Meaning |
 |---|---|---:|---|
 | `name` | string | yes | Canonical display name. |
-| `type` | string | yes | Domain/entity type (validated by extraction, not a Neo4j enum). |
+| `type` | string | yes | Domain/entity type, canonicalized against `entity-registry.yaml` before matching and at the entity write boundary (issue #99); unknown types pass through flagged. Not a Neo4j enum. |
 | `embedding` | list<float> | no | Local Ollama `bge-m3` embedding, 1024 dimensions (ADR-0001). |
+| `aliases` | list<string> | no | Merged surface forms accumulated on the canonical entity (issue #99); appended by resolution when a variant merges, never removed. |
 | `created_at` | datetime | yes | First persistence time. |
 | `updated_at` | datetime | yes | Last mutation time. |
 
 `(name, type)` is the canonical identity. Names may repeat across types, while a name/type
-pair may occur only once. Aliases are not persisted in this slice; resolution can map aliases
-to this identity later.
+pair may occur only once. Surface-form variants resolved onto this identity accumulate as
+`aliases` (issue #99); resolution consults them during exact and containment matching.
 
 ## Nodes
 
