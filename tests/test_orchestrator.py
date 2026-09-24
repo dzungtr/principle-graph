@@ -404,3 +404,57 @@ def test_stats_block_reports_unknown_entity_types_from_writer():
     transcript = result.stats.render()
     assert result.stats.unknown_entity_types == (("xenosophy", 2),)
     assert "unknown entity types passed through uncanonicalized: xenosophy=2" in transcript
+
+
+def test_assemble_preserves_alias_across_interleaved_canonical_mentions():
+    """P1 round 2: a later candidate resolving to the canonical (or the merge
+    candidate's own object slot) must not wipe the same-run alias (AC-1)."""
+    import math
+
+    from principle_graph.resolution import EntityResolver, SessionRegistry
+
+    def _unit(vectors):
+        n = math.sqrt(sum(x * x for x in vectors))
+        return [x / n for x in vectors]
+
+    class FixedEmbedder:
+        def embed(self, text):
+            return _unit([1.0, 0.0]) if text == "Friedrich Merz" else _unit([1.0, 0.02])
+
+    class ContainmentStore(FakeStore):
+        def containment_candidates(self, name, entity_type):
+            return []
+
+    registry = SessionRegistry()
+    resolver = EntityResolver(ContainmentStore(), FixedEmbedder(), registry=registry)
+    merge = resolver.resolve("Friedrich Merz", "person")
+    merz = resolver.resolve("Merz", "person")
+    later = resolver.resolve("Friedrich Merz", "person")
+
+    def _candidate(subject, obj):
+        return {"subject": subject, "subject_type": "person", "relation": "same_as",
+                "object": obj, "object_type": "person", "confidence": 0.9,
+                "evidence": f"{subject} same_as {obj}", "scope_conditions": "",
+                "source_ref": "s1", "domain": ""}
+
+    from principle_graph.extraction import ExtractionRun
+
+    other = resolver.resolve("borrowing", "concept")
+    run = ExtractionRun()
+    orch = IngestOrchestrator(SequentialExtractor(FakeMessages([])),
+                              ContainmentStore(), None, InMemoryGraph())
+    canonical_name = merge.canonical.name
+    # Natural interleaved ordering: merge candidate first, then the canonical
+    # mentioned again, then the canonical's own SAME_AS object slot.
+    pairs = [
+        (_candidate("Merz", "Friedrich Merz"), (merz, later)),
+        (_candidate("Friedrich Merz", "borrowing"), (later, other)),
+        (_candidate("Friedrich Merz", "Friedrich Merz"), (later, later)),
+    ]
+    delta = orch._assemble(run, pairs, existing=[])
+    by_name = {e.name: e for e in delta.new_entities}
+    assert by_name[canonical_name].aliases == ("Merz",), by_name[canonical_name].aliases
+    # Reverse ordering (merge last) still accumulates.
+    delta = orch._assemble(run, list(reversed(pairs)), existing=[])
+    by_name = {e.name: e for e in delta.new_entities}
+    assert by_name[canonical_name].aliases == ("Merz",)

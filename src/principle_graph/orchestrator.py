@@ -290,22 +290,30 @@ class IngestOrchestrator:
             o_name = o_resolution.canonical.name
             s_type = s_resolution.canonical.type
             o_type = o_resolution.canonical.type
-            entity_map[s_name] = GraphEntity(s_name, s_type,
-                                              embedding=tuple(s_resolution.canonical.embedding) if s_resolution.canonical.embedding else None,
-                                              aliases=tuple(dict.fromkeys(
-                                                  tuple(s_resolution.canonical.aliases)
-                                                  + s_resolution.new_aliases)))
-            entity_map[o_name] = GraphEntity(o_name, o_type,
-                                              embedding=tuple(o_resolution.canonical.embedding) if o_resolution.canonical.embedding else None,
-                                              aliases=tuple(dict.fromkeys(
-                                                  tuple(o_resolution.canonical.aliases)
-                                                  + o_resolution.new_aliases)))
+            # Union into any existing entry: a later candidate resolving to the same
+            # canonical (or a candidate's own object slot) must not wipe aliases
+            # accumulated by an earlier same-run merge (AC-1, order-independence).
+            entity_map[s_name] = self._merge_entity_entry(
+                entity_map.get(s_name), s_resolution)
+            entity_map[o_name] = self._merge_entity_entry(
+                entity_map.get(o_name), o_resolution)
             edges.append(GraphEdge(
                 s_name, candidate["relation"].upper(), o_name,
                 candidate["confidence"], candidate["source_ref"],
                 (candidate["evidence"],), candidate["scope_conditions"],
                 candidate.get("domain", "")))
         return assemble_delta(edges, existing=existing, entities=list(entity_map.values()))
+
+    @staticmethod
+    def _merge_entity_entry(prev: GraphEntity | None, resolution) -> GraphEntity:
+        canonical = resolution.canonical
+        aliases = tuple(dict.fromkeys(
+            (prev.aliases if prev else ())
+            + tuple(canonical.aliases)
+            + resolution.new_aliases))
+        embedding = tuple(canonical.embedding) if canonical.embedding else None
+        return GraphEntity(canonical.name, canonical.type,
+                           embedding=embedding, aliases=aliases)
 
     @staticmethod
     def _ensure_create_new(resolution) -> Any:
