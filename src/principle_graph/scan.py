@@ -218,7 +218,7 @@ def scan_source(
         response = client.create(
             model=model,
             system=scan_system,
-            max_tokens=1024,
+            max_tokens=16384,
             tools=[SCAN_TOOL],
             tool_choice={"type": "tool", "name": "scan_candidates"},
             messages=[{"role": "user", "content": _batch_text(batch)}],
@@ -243,7 +243,7 @@ def scan_source(
         clustered = client.create(
             model=model,
             system=cluster_system,
-            max_tokens=1024,
+            max_tokens=16384,
             tools=[CLUSTER_TOOL],
             tool_choice={"type": "tool", "name": "consolidate_candidates"},
             messages=[{"role": "user", "content": _remainder_text(
