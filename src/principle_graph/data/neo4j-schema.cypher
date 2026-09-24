@@ -41,3 +41,12 @@ ON (source.id);
 CREATE RANGE INDEX verdict_id IF NOT EXISTS
 FOR (verdict:Verdict)
 ON (verdict.id);
+
+// State ledger (issue #98, ADR-0007): append-only :StateEvent rows wired
+// (:Entity)-[:HAS_STATE_EVENT]->(:StateEvent); row identity is (entity,
+// state_key, source_ref), enforced by the write layer's pattern MERGE. The
+// denormalized current-state map lives on Entity.state and is recomputed from
+// rows on every write. This index supports per-source state provenance walks.
+CREATE RANGE INDEX state_event_source_ref IF NOT EXISTS
+FOR (event:StateEvent)
+ON (event.source_ref);

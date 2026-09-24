@@ -45,8 +45,13 @@ def render_claim(candidate: Mapping[str, Any]) -> str:
 
     Uses the extractor's own raw relation, lowercased with underscores as
     spaces (``MAY_DESCRIBE`` → ``may describe``). Scope conditions are
-    deliberately excluded — bare-claim classification per ADR-0006.
+    deliberately excluded — bare-claim classification per ADR-0006. A candidate
+    carrying a pre-rendered ``claim`` key (issue #98: states rendered by
+    ``state.render_state_claim``) passes through unchanged.
     """
+    pre_rendered = candidate.get("claim")
+    if pre_rendered:
+        return str(pre_rendered)
     relation_as_words = str(candidate["relation"]).strip().casefold().replace("_", " ")
     return f"{candidate['subject']} {relation_as_words} {candidate['object']}"
 

@@ -16,12 +16,21 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from .extraction import ExtractionRun, SequentialExtractor
 from .extraction_contract import Chunk, chunk_markdown, chunk_pdf
 from .novelty import NoveltyFilter, apply_novelty_filter
 from .reduction import GraphEdge, GraphEntity, GraphWriter, InMemoryGraph, assemble_delta, commit_delta
 from .resolution import AmbiguityItem, EntityResolver, Resolution, SessionRegistry
 from .review import GraphDelta, ReviewResult, review_and_commit
+from .state import (
+    StateEvent,
+    StateNoveltyStats,
+    apply_state_novelty_filter,
+)
 
 
 def normalize_candidate(name: str) -> str:
@@ -71,6 +80,16 @@ class IngestStats:
     filtered_noise: int = 0
     filtered_common_sense: int = 0
     novelty_mean_probabilities: Mapping[str, float] = field(default_factory=dict)
+    # Issue #98: state tracking. States pass the same novelty gate as claims
+    # (deduped by entity + state_key + value); the ledger write happens only on
+    # an approved review, keeping the triple pipeline's commit semantics.
+    state_novelty_calls: int = 0
+    states_filtered_noise: int = 0
+    states_filtered_common_sense: int = 0
+    states_committed: int = 0
+    # Unknown state keys passed through uncanonicalized (never-reject stance),
+    # per-key occurrence counts; empty when all keys canonicalized.
+    unknown_state_keys: tuple[tuple[str, int], ...] = ()
 
     def render(self) -> str:
         committed_lines = [
@@ -110,6 +129,18 @@ class IngestStats:
                                sorted(self.novelty_mean_probabilities.items()))
             committed_lines.append(
                 f"novelty calls: {self.novelty_calls}; mean probabilities: {means or '(none)'}")
+        if self.state_novelty_calls or self.states_filtered_noise \
+                or self.states_filtered_common_sense:
+            committed_lines.append(
+                f"states: {self.states_committed} committed; "
+                f"filtered states: {self.states_filtered_noise + self.states_filtered_common_sense} "
+                f"(noise={self.states_filtered_noise}, "
+                f"common_sense={self.states_filtered_common_sense}); "
+                f"state novelty calls: {self.state_novelty_calls}")
+        if self.unknown_state_keys:
+            unknown = ", ".join(f"{key}={count}" for key, count in self.unknown_state_keys)
+            committed_lines.append(
+                f"unknown state keys passed through uncanonicalized: {unknown}")
         committed_lines.append(
             f"elapsed seconds: {self.elapsed_seconds:.3f}",
         )
@@ -149,6 +180,7 @@ class IngestOrchestrator:
         edge_loader: ExistingEdgeLoader | None = None,
         rejected_log_path: str = ".pg/rejected.jsonl",
         novelty_filter: "NoveltyFilter | None" = None,
+        state_registry: "Any | None" = None,
     ) -> None:
         self.extractor = extractor
         self.store = store
@@ -157,6 +189,10 @@ class IngestOrchestrator:
         self.edge_loader = edge_loader
         self.rejected_log_path = rejected_log_path
         self.novelty_filter = novelty_filter
+        # State-key registry (issue #96/#98): lazy-loaded packaged registry when
+        # not injected, so constructing an orchestrator stays side-effect free.
+        self._state_registry = state_registry
+        self._unknown_state_key_counts: dict[str, int] = {}
 
     def run(
         self,
@@ -171,8 +207,17 @@ class IngestOrchestrator:
         # keeps the current behavior with zero Jev calls. A filter failure raises
         # out of ``run`` — the ingest aborts with no partial state.
         novelty = None
+        state_novelty = StateNoveltyStats()
+        approved_states: list[StateEvent] = []
+        if run.state_candidates:
+            approved_states = [self._state_event(c) for c in run.state_candidates]
         if self.novelty_filter is not None:
             run.candidates, novelty = apply_novelty_filter(run.candidates, self.novelty_filter)
+            # States pass the same gate as rendered claims (issue #98); a filter
+            # failure here aborts the ingest identically to the triple gate.
+            if approved_states:
+                approved_states, state_novelty = apply_state_novelty_filter(
+                    approved_states, self.novelty_filter)
         resolution = self._resolve(run, source_id)
         triples = self._candidate_triples(run, resolution)
         existing: list[GraphEdge] = []
@@ -193,6 +238,9 @@ class IngestOrchestrator:
         committed_entities = len(delta.new_entities)
         committed_edges = len(delta.new_edges) + len(delta.updated_edges)
         verdict = "rejected" if review.rejected else "approved"
+        states_committed = 0
+        if verdict == "approved":
+            states_committed = self._commit_states(approved_states, source_id)
         stats = IngestStats(
             source=source_id,
             chunks_sequential=run.completed_chunks,
@@ -216,6 +264,11 @@ class IngestOrchestrator:
             filtered_noise=(novelty.filtered_noise if novelty else 0),
             filtered_common_sense=(novelty.filtered_common_sense if novelty else 0),
             novelty_mean_probabilities=(dict(novelty.mean_probabilities) if novelty else {}),
+            state_novelty_calls=state_novelty.novelty_calls,
+            states_filtered_noise=state_novelty.filtered_noise,
+            states_filtered_common_sense=state_novelty.filtered_common_sense,
+            states_committed=states_committed,
+            unknown_state_keys=tuple(sorted(self._unknown_state_key_counts.items())),
         )
         return IngestResult(stats=stats, delta=delta, review=review, graph=self.writer)
 
@@ -284,6 +337,75 @@ class IngestOrchestrator:
                 (candidate["evidence"],), candidate["scope_conditions"],
                 candidate.get("domain", "")))
         return assemble_delta(edges, existing=existing, entities=list(entity_map.values()))
+
+    def _state_event(self, candidate: Mapping[str, Any]) -> StateEvent:
+        """Typed state candidate with the state key canonicalized at the boundary.
+
+        Unknown keys pass through flagged (never-reject stance, PRD #95) and are
+        counted per occurrence for the run summary.
+        """
+        registry = self._state_registry
+        if registry is None:
+            from .label_registry import default_state_registry_path, load_label_registry
+            registry = self._state_registry = load_label_registry(
+                default_state_registry_path())
+        raw_key = str(candidate["state_key"])
+        state_key = registry.canonical_for(raw_key)
+        unknown_key = not registry.is_known(raw_key)
+        if unknown_key:
+            self._unknown_state_key_counts[state_key] = (
+                self._unknown_state_key_counts.get(state_key, 0) + 1)
+            logger.warning(
+                "unregistered state key %r passed through uncanonicalized; "
+                "add it (or an alias) to state-registry.yaml to consolidate it",
+                raw_key)
+        return StateEvent(
+            entity=str(candidate["entity"]),
+            entity_type=str(candidate["entity_type"]),
+            state_key=state_key,
+            value=str(candidate["value"]),
+            unit=str(candidate.get("unit", "")),
+            as_of=str(candidate["as_of"]),
+            confidence=float(candidate["confidence"]),
+            evidence=str(candidate["evidence"]),
+            scope_conditions=str(candidate.get("scope_conditions", "")),
+            source_ref=str(candidate["source_ref"]),
+            unknown_key=unknown_key,
+        )
+
+    def _commit_states(self, approved_states: Sequence[StateEvent], source_id: str) -> int:
+        """Commit approved states to the writer's state ledger seam (issue #98).
+
+        The entity resolves like a triple endpoint (same ambiguity default);
+        the writer applies keep-first identity ``(entity, state_key,
+        source_ref)``. Writers without the seam (legacy fakes) skip silently.
+        """
+        upsert_state = getattr(self.writer, "upsert_state_event", None)
+        if not callable(upsert_state) or not approved_states:
+            return 0
+        registry = SessionRegistry()
+        resolver = EntityResolver(self.store, self.embedder, registry)
+        committed = 0
+        for state in approved_states:
+            resolution = self._ensure_create_new(resolver.resolve(
+                state.entity, state.entity_type, source_ref=state.source_ref))
+            if resolution.canonical is None:
+                continue
+            committed += 1
+            upsert_state(StateEvent(
+                             entity=resolution.canonical.name,
+                             entity_type=resolution.canonical.type,
+                             state_key=state.state_key,
+                             value=state.value,
+                             unit=state.unit,
+                             as_of=state.as_of,
+                             confidence=state.confidence,
+                             evidence=state.evidence,
+                             scope_conditions=state.scope_conditions,
+                             source_ref=state.source_ref,
+                             unknown_key=state.unknown_key,
+                         ))
+        return committed
 
     @staticmethod
     def _ensure_create_new(resolution) -> Any:

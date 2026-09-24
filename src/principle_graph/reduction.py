@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 from .review import GraphDelta, GraphEdge, GraphEntity
+from .state import StateEvent, plan_state_writes
 
 
 def aggregate_confidence(previous: float, event: float, *, independent: bool = True) -> float:
@@ -118,6 +119,9 @@ class InMemoryGraph:
     entities: list[GraphEntity] = field(default_factory=list)
     edges: dict[tuple[str, str, str], GraphEdge] = field(default_factory=dict)
     rejected: list[dict[str, object]] = field(default_factory=list)
+    # State ledger (issue #98): append-only :StateEvent rows (ADR-0007), with the
+    # current-state map recomputed from rows on every write.
+    state_events: list[StateEvent] = field(default_factory=list)
 
     def upsert_entity(self, entity: GraphEntity) -> None:
         if entity not in self.entities:
@@ -132,3 +136,20 @@ class InMemoryGraph:
 
     def record_rejected(self, record: dict[str, object]) -> None:
         self.rejected.append(record)
+
+    def upsert_state_event(self, event: StateEvent) -> None:
+        """Append one state row under keep-first identity and recompute the map."""
+        plan = plan_state_writes(self.state_events, [event])
+        self.state_events.extend(plan.rows_to_create)
+
+    def current_state(self, entity: str) -> dict[str, dict]:
+        """Denormalized current-state map for one entity, recomputed from rows."""
+        return plan_state_writes(self.state_events, []).current_state.get(entity, {})
+
+    def states_for(self, entity) -> list:
+        """Current states for one resolved entity, for fan-out output (issue #98)."""
+        from .state import EntityState
+        name = getattr(entity, "name", entity)
+        return [EntityState(name, state_key, entry["value"], entry["unit"],
+                            entry["as_of"], entry["confidence"], entry["source_ref"])
+                for state_key, entry in self.current_state(name).items()]

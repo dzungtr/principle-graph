@@ -11,12 +11,14 @@ from .label_registry import (
     LabelRegistry,
     default_domain_registry_path,
     default_registry_path,
+    default_state_registry_path,
     load_label_registry,
 )
 from .ledger import LedgerRow, plan_ledger_writes, resolve_repeat_mode, source_id_of
 from .normalization import plan_normalization
 from .reduction import GraphEdge, GraphEntity
 from .resolution import Entity, SimilarEntity
+from .state import EntityState, StateEvent, plan_state_writes
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +82,7 @@ class Neo4jGraphWriter:
         repeat_mode: str = "keep-first",
         relation_registry: LabelRegistry | None = None,
         domain_registry: LabelRegistry | None = None,
+        state_registry: LabelRegistry | None = None,
     ) -> None:
         self.driver = driver
         self.database = database
@@ -100,6 +103,14 @@ class Neo4jGraphWriter:
         )
         self.unknown_domain_counts: dict[str, int] = {}
         self._warned_unknown_domain: set[str] = set()
+        # State keys (issue #98) share the loader contract; unknown keys pass
+        # through flagged — never rejected (PRD #95 never-reject stance).
+        self.state_registry = (
+            state_registry if state_registry is not None
+            else load_label_registry(default_state_registry_path())
+        )
+        self.unknown_state_counts: dict[str, int] = {}
+        self._warned_unknown_state: set[str] = set()
         # Unknown verbs pass through flagged: warned once per distinct verb,
         # counted per occurrence for the run summary (PRD #76).
         self.unknown_relation_counts: dict[str, int] = {}
@@ -822,6 +833,123 @@ class Neo4jGraphWriter:
 
     def record_rejected(self, record: dict[str, object]) -> None:
         self.rejected_sink.record_rejected(record)
+
+    # --- state ledger (issue #98, ADR-0007 two-layer precedent) -----------
+
+    def _canonical_state_key(self, raw_key: str) -> tuple[str, bool]:
+        """Canonicalize one state key; unknown keys pass flagged, never rejected."""
+        canonical = self.state_registry.canonical_for(raw_key)
+        unknown = not self.state_registry.is_known(raw_key)
+        if unknown:
+            self.unknown_state_counts[canonical] = (
+                self.unknown_state_counts.get(canonical, 0) + 1)
+            if canonical not in self._warned_unknown_state:
+                self._warned_unknown_state.add(canonical)
+                logger.warning(
+                    "unregistered state key %r passed through uncanonicalized; "
+                    "add it (or an alias) to state-registry.yaml to consolidate it",
+                    raw_key)
+        return canonical, unknown
+
+    _STATE_ROWS_LOAD_QUERY = (
+        "MATCH (e:Entity {name: $entity})-[:HAS_STATE_EVENT]->"
+        "(s:StateEvent {state_key: $state_key}) "
+        "RETURN s.source_ref AS source_ref, s.confidence AS confidence, "
+        "s.evidence AS evidence, s.scope_conditions AS scope_conditions, "
+        "s.value AS value, s.unit AS unit, s.as_of AS as_of, "
+        "s.entity_type AS entity_type"
+    )
+    # Identity-bearing write shape (ADR-0002 precedent): the pattern MERGE on
+    # (entity, state_key, source_ref) enforces keep-first where Community 5.x
+    # cannot express composite uniqueness across relationship endpoints.
+    _STATE_ROW_MERGE_QUERY = (
+        "MERGE (e:Entity {name: $entity, type: $entity_type}) "
+        "MERGE (e)-[:HAS_STATE_EVENT]->"
+        "(s:StateEvent {state_key: $state_key, source_ref: $source_ref}) "
+        "ON CREATE SET s.value = $value, s.unit = $unit, s.as_of = $as_of, "
+        "s.confidence = $confidence, s.evidence = $evidence, "
+        "s.scope_conditions = $scope_conditions, s.entity_type = $entity_type, "
+        "s.created_at = datetime(), s.updated_at = datetime() "
+        "ON MATCH SET s.updated_at = datetime()"
+    )
+    _STATE_ROW_SOURCE_LINK_CLAUSE = (
+        "MERGE (src:Source {id: $source_id}) "
+        "ON CREATE SET src.first_seen = datetime() "
+        "MERGE (s)-[:FROM_SOURCE]->(src)"
+    )
+    # Denormalized current-state map: recomputed from rows on every write
+    # (latest as_of wins, then confidence — reordering happens here in Python
+    # so the policy core stays the single source of truth, like arrow aggregates).
+    _STATE_MAP_SET_QUERY = (
+        "MATCH (e:Entity {name: $entity, type: $entity_type}) "
+        "SET e.state = $state, e.updated_at = datetime()"
+    )
+
+    def upsert_state_event(self, state: StateEvent) -> None:
+        """Append one state assertion as a ledger row and recompute the entity map."""
+        state_key, _unknown = self._canonical_state_key(state.state_key)
+        candidate = StateEvent(
+            entity=state.entity, entity_type=state.entity_type,
+            state_key=state_key, value=state.value, unit=state.unit,
+            as_of=state.as_of, confidence=state.confidence,
+            evidence=state.evidence, scope_conditions=state.scope_conditions,
+            source_ref=state.source_ref, unknown_key=_unknown,
+        )
+        with self.driver.session(database=self.database) as session:
+            existing = [
+                StateEvent(
+                    entity=candidate.entity, entity_type=record["entity_type"] or "",
+                    state_key=state_key, value=record["value"] or "",
+                    unit=record["unit"] or "", as_of=record["as_of"] or "",
+                    confidence=record["confidence"] or 0.0,
+                    evidence=record["evidence"] or "",
+                    scope_conditions=record["scope_conditions"] or "",
+                    source_ref=record["source_ref"] or "",
+                )
+                for record in session.run(
+                    self._STATE_ROWS_LOAD_QUERY,
+                    entity=candidate.entity, state_key=state_key,
+                )
+            ]
+            plan = plan_state_writes(existing, [candidate])
+            for row in plan.rows_to_create:
+                query = self._STATE_ROW_MERGE_QUERY
+                params: dict[str, Any] = {
+                    "entity": row.entity, "entity_type": row.entity_type,
+                    "state_key": row.state_key, "source_ref": row.source_ref,
+                    "value": row.value, "unit": row.unit, "as_of": row.as_of,
+                    "confidence": row.confidence, "evidence": row.evidence,
+                    "scope_conditions": row.scope_conditions,
+                }
+                if row.source_ref:
+                    params["source_id"] = source_id_of(row.source_ref)
+                    query = f"{query} {self._STATE_ROW_SOURCE_LINK_CLAUSE}"
+                session.run(query, **params)
+            # Recompute the whole denormalized map for this entity from all rows.
+            all_rows = list(existing) + list(plan.rows_to_create)
+            for entity_name, entries in plan.current_state.items():
+                session.run(
+                    self._STATE_MAP_SET_QUERY,
+                    entity=entity_name, entity_type=candidate.entity_type,
+                    state=json.dumps(entries, default=str),
+                )
+
+    def states_for(self, name: str) -> list[EntityState]:
+        """Current states for one entity, read from the denormalized map."""
+        query = ("MATCH (e:Entity {name: $name}) RETURN e.state AS state")
+        with self.driver.session(database=self.database) as session:
+            record = session.run(query, name=name).single()
+        if record is None or not record.get("state"):
+            return []
+        raw = record.get("state")
+        entries = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        return [
+            EntityState(name, state_key, entry.get("value", ""),
+                        entry.get("unit", ""), entry.get("as_of", ""),
+                        float(entry.get("confidence", 0.0)),
+                        entry.get("source_ref", ""))
+            for state_key, entry in sorted(entries.items())
+        ]
 
 
 class Neo4jEntityStore:
