@@ -1011,6 +1011,12 @@ class Neo4jEntityStore:
         self.driver = driver
         self.database = database
 
+    def list_relation_types(self) -> tuple[str, ...]:
+        """Distinct relation verb types live in the graph (issue #102 scan consolidation)."""
+        query = "MATCH ()-[r]->() RETURN DISTINCT type(r) AS relType ORDER BY relType"
+        with self.driver.session(database=self.database) as session:
+            return tuple(row["relType"] for row in session.run(query))
+
     def find_entities(self, name: str, entity_type: str) -> Sequence[Entity]:
         # Issue #99 P1: persisted aliases are consulted, so a recorded surface
         # form resolves on a later ingest without vector corroboration (AC-3).

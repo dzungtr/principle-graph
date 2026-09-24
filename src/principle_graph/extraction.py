@@ -111,7 +111,10 @@ class SequentialExtractor:
         self.model = model
         self.system = system
 
-    def run(self, chunks: Sequence[Chunk]) -> ExtractionRun:
+    def run(self, chunks: Sequence[Chunk], *, verb_menu: Sequence[str] = (),
+            entity_roster: Sequence[str] = ()) -> ExtractionRun:
+        # Issue #102: the two-pass scan's verb menu + entity roster ride every
+        # chunk prompt; empty menus render the pre-scan prompt unchanged.
         scratch = ExtractionRun()
         for chunk in chunks:
             response = self.client.create(
@@ -120,7 +123,8 @@ class SequentialExtractor:
                 max_tokens=4096,
                 tools=[PROPOSE_TRIPLE_TOOL, PROPOSE_STATE_TOOL],
                 tool_choice={"type": "auto"},
-                messages=[{"role": "user", "content": self._chunk_prompt(chunk)}],
+                messages=[{"role": "user", "content": self._chunk_prompt(
+                    chunk, verb_menu=verb_menu, entity_roster=entity_roster)}],
             )
             for block in self._tool_blocks(response):
                 name = getattr(block, "name", None)
@@ -150,13 +154,21 @@ class SequentialExtractor:
         return scratch
 
     @staticmethod
-    def _chunk_prompt(chunk: Chunk) -> str:
+    def _chunk_prompt(chunk: Chunk, *, verb_menu: Sequence[str] = (),
+                      entity_roster: Sequence[str] = ()) -> str:
         metadata = f"source_ref: {chunk.source_ref}\nchunk_id: {chunk.id}"
         if chunk.section_path:
             metadata += f"\nsection_path: {' / '.join(chunk.section_path)}"
         if chunk.pages:
             metadata += f"\npages: {', '.join(map(str, chunk.pages))}"
-        return f"Extract from this chunk.\n\n{metadata}\n\nchunk text:\n{chunk.text}"
+        # Issue #102 injection point (PRD #95 Handoffs): after the metadata
+        # block, before `chunk text:`.
+        sections = ""
+        if verb_menu:
+            sections += f"\nverb menu: {', '.join(verb_menu)}"
+        if entity_roster:
+            sections += f"\nentity roster: {'; '.join(entity_roster)}"
+        return f"Extract from this chunk.\n\n{metadata}{sections}\n\nchunk text:\n{chunk.text}"
 
     @staticmethod
     def _tool_blocks(response: Any) -> list[Any]:
@@ -172,4 +184,6 @@ class SequentialExtractor:
 
 def extract_chunks(chunks: Sequence[Chunk], client: MessagesClient, **kwargs: Any) -> ExtractionRun:
     """Convenience wrapper for a single sequential extraction session."""
-    return SequentialExtractor(client, **kwargs).run(chunks)
+    menu = kwargs.pop("verb_menu", ())
+    roster = kwargs.pop("entity_roster", ())
+    return SequentialExtractor(client, **kwargs).run(chunks, verb_menu=menu, entity_roster=roster)
