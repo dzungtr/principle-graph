@@ -5,3 +5,5 @@ demo
 __pycache__
 .venv/
 *.egg-info/
+build/
+dist/
