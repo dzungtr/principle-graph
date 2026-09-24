@@ -164,7 +164,8 @@ class IngestStats:
             unknown = ", ".join(f"{key}={count}" for key, count in self.unknown_state_keys)
             committed_lines.append(
                 f"unknown state keys passed through uncanonicalized: {unknown}")
-        if self.dispatch_calls or self.dispatch_dropped or self.dispatch_flagged_notes:
+        if self.dispatch_calls or self.dispatch_bypassed or self.dispatch_dropped \
+                or self.dispatch_flagged_notes:
             steps = ", ".join(f"{step}={count}"
                                for step, count in sorted(self.dispatch_step_counts.items()))
             committed_lines.append(
@@ -284,7 +285,13 @@ class IngestOrchestrator:
         # Render ambiguity queue as review notes on the delta. We always default
         # to create-new: never auto-merge ambiguous candidates.
         delta, ambiguity_notes = self._annotate_ambiguity(delta, resolution)
-        review = review_and_commit(delta, self.writer, input_fn=input_fn or (lambda _prompt: "approve"))
+        # Issue #101 fix round 1: flagged candidates surface at the Mode-2
+        # review checkpoint — before the approve/reject prompt — so the human
+        # reviewer sees what dispatch declined to reshape (PRD #95 story 23).
+        review = review_and_commit(
+            delta, self.writer,
+            input_fn=input_fn or (lambda _prompt: "approve"),
+            flagged_notes=tuple(dispatch_stats["flagged"]))
         committed_entities = len(delta.new_entities)
         committed_edges = len(delta.new_edges) + len(delta.updated_edges)
         verdict = "rejected" if review.rejected else "approved"
@@ -368,6 +375,14 @@ class IngestOrchestrator:
             run.state_candidates.extend(result.states)
             for record in result.flagged:
                 stats["flagged"].append(record["reason"])
+            for record in result.rejected:
+                # Partially-invalid member lists: valid repairs flow; each
+                # skipped member gets an auditable rejected-log record.
+                stats["dropped"] += 1
+                stats["steps"]["skipped_members"] = stats["steps"].get("skipped_members", 0) + 1
+                record_rejected = getattr(self.writer, "record_rejected", None)
+                if callable(record_rejected):
+                    record_rejected(record)
         run.candidates = kept
 
     def _record_dispatch_rejection(self, candidate: Mapping[str, Any],

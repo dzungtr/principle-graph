@@ -298,6 +298,9 @@ class RepairedCandidate:
     triples: tuple[dict[str, Any], ...] = ()
     states: tuple[dict[str, Any], ...] = ()
     flagged: tuple[dict[str, Any], ...] = ()
+    # Per-member rejected-log records for partially-invalid member lists
+    # (decompose / joint edges): valid members flow, skipped members are audited.
+    rejected: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -309,6 +312,17 @@ class Dropped:
     flagged: bool = True
 
 
+def _claim_context(candidate: Mapping[str, Any]) -> str:
+    """Self-contained claim rendering: the reviewer must see what was flagged.
+
+    Mode-2 review visibility (issue #101 / PRD #95 story 23) requires the flag
+    note to carry the claim text and evidence — a content-free reason would
+    silently hide a good claim the guards false-positived on.
+    """
+    return (f"claim {candidate.get('subject', '')!r} -[{candidate.get('relation', '')}]-> "
+            f"{candidate.get('object', '')!r} | evidence: {candidate.get('evidence', '')}")
+
+
 def _flagged_record(candidate: Mapping[str, Any], guard_class: str, step: str,
                     payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
@@ -317,7 +331,8 @@ def _flagged_record(candidate: Mapping[str, Any], guard_class: str, step: str,
         "step": step,
         "payload": dict(payload),
         "source_ref": candidate.get("source_ref", ""),
-        "reason": f"{guard_class} repaired via {step}; flagged for Mode-2 review",
+        "reason": (f"{guard_class} repaired via {step}; flagged for Mode-2 review: "
+                   f"{_claim_context(candidate)}"),
     }
 
 
@@ -358,6 +373,20 @@ def _state_candidate(candidate: Mapping[str, Any], payload: Mapping[str, Any]) -
         "scope_conditions": candidate.get("scope_conditions", ""),
         "source_ref": candidate["source_ref"],
     }
+
+
+def _member_rejections(candidate: Mapping[str, Any], step: str,
+                       errors: Sequence[str]) -> tuple[dict[str, Any], ...]:
+    """Rejected-log records for skipped members: nothing silently lost."""
+    return tuple({
+        "candidate": dict(candidate),
+        "guard_class": "",
+        "step": step,
+        "source_ref": candidate.get("source_ref", ""),
+        "decision": "rejected",
+        "verdict": "invalid_payload",
+        "reason": f"skipped {error}",
+    } for error in errors)
 
 
 def _member_triples(candidate: Mapping[str, Any], members: Any,
@@ -442,7 +471,8 @@ def dispatch(candidate: Mapping[str, Any], guard_class: str, chunk: Chunk,
         repaired, errors = _member_triples(candidate, payload.get("triples"))
         if errors and not repaired:
             return Dropped("invalid_payload", "; ".join(errors))
-        return RepairedCandidate(choice, triples=repaired)
+        return RepairedCandidate(choice, triples=repaired,
+                                 rejected=_member_rejections(candidate, choice, errors))
 
     if choice in ("pairwise_joint_edge", "joint_with_scope"):
         scope = (str(payload["scope_conditions"]) if choice == "joint_with_scope"
@@ -451,7 +481,8 @@ def dispatch(candidate: Mapping[str, Any], guard_class: str, chunk: Chunk,
                                            scope_conditions=scope)
         if errors and not repaired:
             return Dropped("invalid_payload", "; ".join(errors))
-        return RepairedCandidate(choice, triples=repaired)
+        return RepairedCandidate(choice, triples=repaired,
+                                 rejected=_member_rejections(candidate, choice, errors))
 
     if choice == "named_group":
         slot = flagged_endpoint(candidate, guard_class, thresholds)
@@ -495,7 +526,8 @@ def dispatch(candidate: Mapping[str, Any], guard_class: str, chunk: Chunk,
 
     if choice == "to_source":
         record = _flagged_record(candidate, guard_class, choice, payload)
-        record["reason"] = f"deictic/meta routed to source layer: {payload['note']}"
+        record["reason"] = (f"deictic/meta routed to source layer: {payload['note']} "
+                            f"[{_claim_context(candidate)}]")
         return RepairedCandidate(choice, flagged=[record])
 
     if choice == "pass_flagged":

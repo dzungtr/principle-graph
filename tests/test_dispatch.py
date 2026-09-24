@@ -14,6 +14,7 @@ from principle_graph.dispatch import (
     CATEGORY_MENUS,
     DispatchError,
     DispatchStep,
+    Dropped,
     GUARD_CLASSES,
     JevDispatchClient,
     classify_candidate,
@@ -525,3 +526,70 @@ def test_dispatch_opt_out_skips_seam_entirely(tmp_path):
     # legacy behavior preserved when the dispatcher is not injected
     assert result.stats.dispatch_calls == 0 and result.stats.dispatch_bypassed == 0
     assert len(result.delta.new_edges) == 1
+
+
+# --- fix round 1: Mode-2 review visibility + skipped-member audit ------------
+
+def test_pass_flagged_flag_record_carries_claim_and_evidence():
+    result = dispatch(_candidate(), "numeric_endpoint", CHUNK,
+                      _step("pass_flagged", {}))
+    reason = result.flagged[0]["reason"]
+    assert "US Treasury" in reason and "borrows" in reason
+    assert "$1 trillion" in reason  # claim is visible, not just a count
+    assert "US Treasury is borrowing $1 trillion short-term" in reason
+
+
+def test_to_source_reason_carries_claim_evidence_and_note():
+    result = dispatch(_candidate(subject="ECB", relation="warns",
+                                 object_="policy", evidence="ECB warns on policy"),
+                      "deictic", CHUNK,
+                      _step("to_source", {"note": "meta commentary"}))
+    reason = result.flagged[0]["reason"]
+    assert "meta commentary" in reason
+    assert "ECB" in reason and "warns" in reason
+    assert "ECB warns on policy" in reason
+
+
+def test_partially_invalid_decompose_keeps_valid_and_audits_skipped_members():
+    good = {"subject": "France", "subject_type": "country", "relation": "trades",
+            "object": "Germany", "object_type": "country"}
+    bad = {"subject": "France"}  # missing relation/object
+    result = dispatch(_candidate(), "clause", CHUNK,
+                      _step("decompose", {"triples": [good, bad]}))
+    assert not isinstance(result, Dropped)
+    assert len(result.triples) == 1
+    assert len(result.rejected) == 1
+    record = result.rejected[0]
+    assert record["verdict"] == "invalid_payload"
+    assert record["decision"] == "rejected"
+    assert "member 1" in record["reason"]
+
+
+def test_partially_invalid_edges_keeps_valid_and_audits_skipped_members():
+    good = {"subject": "US", "subject_type": "country", "relation": "sanctions",
+            "object": "Iran", "object_type": "country"}
+    bad = {"relation": "sanctions"}  # missing subject/object
+    result = dispatch(_candidate(), "clause", CHUNK,
+                      _step("pairwise_joint_edge", {"edges": [good, bad]}))
+    assert len(result.triples) == 1
+    assert len(result.rejected) == 1
+    assert "member 1" in result.rejected[0]["reason"]
+
+
+def test_skipped_members_land_in_rejected_log_and_stats(tmp_path):
+    good = {"subject": "France", "subject_type": "country", "relation": "trades",
+            "object": "Germany", "object_type": "country"}
+    bad = {"subject": "France"}
+    dispatcher = _FakeDispatcher([DispatchStep("decompose", {"triples": [good, bad]})])
+    orch, writer = _orchestrator([_candidate()], dispatcher=dispatcher)
+    result = orch.run(_source(tmp_path))
+    assert len(writer.rejected) == 1
+    assert writer.rejected[0]["verdict"] == "invalid_payload"
+    assert result.stats.dispatch_step_counts["skipped_members"] == 1
+    assert len(result.delta.new_edges) == 1  # the valid member still flows
+
+
+def test_stats_render_shows_all_bypassed_run(tmp_path):
+    orch, _ = _orchestrator([WELL_FORMED], dispatcher=_FakeDispatcher())
+    result = orch.run(_source(tmp_path))
+    assert "dispatch: 0 calls, 1 bypassed, 0 dropped" in result.stats.render()
