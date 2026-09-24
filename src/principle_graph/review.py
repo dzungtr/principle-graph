@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Callable, Protocol
+from typing import Callable, Protocol, Sequence
 
 
 class _GraphWriter(Protocol):
@@ -71,8 +71,15 @@ def render_delta(delta: GraphDelta) -> str:
     return "\n".join(lines)
 
 
-def review_delta(delta: GraphDelta, input_fn: Callable[[str], str] = input) -> ReviewResult:
+def review_delta(delta: GraphDelta, input_fn: Callable[[str], str] = input,
+                 flagged_notes: Sequence[str] = ()) -> ReviewResult:
     print(render_delta(delta))
+    # Mode-2 review visibility (issue #101): dispatch-flagged candidates render
+    # before the decision prompt so the reviewer sees what was not reshaped.
+    if flagged_notes:
+        print("Dispatch-flagged candidates (visible for review):")
+        for note in flagged_notes:
+            print(f"  - {note}")
     rejected: list[dict[str, object]] = []
     while True:
         decision = input_fn("[a]pprove, [r]eject, or [e]dit confidence: ").strip().lower()
@@ -148,11 +155,12 @@ def _rejection_records(delta: GraphDelta) -> list[dict[str, object]]:
 
 
 def review_and_commit(delta: GraphDelta, writer: _GraphWriter,
-                      input_fn: Callable[[str], str] = input) -> ReviewResult:
+                      input_fn: Callable[[str], str] = input,
+                      flagged_notes: Sequence[str] = ()) -> ReviewResult:
     """Review a complete delta and commit only the approved verdict."""
     from .reduction import commit_delta
 
-    result = review_delta(delta, input_fn=input_fn)
+    result = review_delta(delta, input_fn=input_fn, flagged_notes=flagged_notes)
     for record in result.rejected:
         writer.record_rejected(record)
     if result.approved != GraphDelta():

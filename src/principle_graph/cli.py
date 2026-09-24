@@ -269,6 +269,7 @@ def build_orchestrator(settings: Settings, repeat_mode: str | None = None,
         rejected_log_path=settings.rejected_log_path,
         novelty_filter=novelty_filter,
         entity_registry=entity_registry,
+        dispatcher=_dispatcher_for(settings, no_novelty_filter=False),
         scanner=scanner,
     )
     return orchestrator, driver
@@ -370,6 +371,25 @@ def _novelty_filter_for(settings: Settings, no_novelty_filter: bool):
     )
 
 
+def _dispatcher_for(settings: Settings, no_novelty_filter: bool):
+    """Construct the mis-shape dispatch client (issue #101); ``None`` when opted out.
+
+    Shares the novelty gate's key and opt-out: both are OpenRouter Decisions
+    calls over the same credential, so one flag skips both Jev seams.
+    """
+    if no_novelty_filter:
+        return None
+    from .dispatch import JevDispatchClient
+    return JevDispatchClient(
+        # getattr fallbacks keep minimal Settings stubs in older tests working.
+        base_url=getattr(settings, "jev_base_url",
+                         "https://openrouter.ai/api/alpha/decisions"),
+        model=getattr(settings, "jev_model", "typesafe/jev-1.13"),
+        api_key=os.getenv("OPENROUTER_API_KEY", ""),
+        timeout=getattr(settings, "jev_timeout", 10.0),
+    )
+
+
 def ingest_command(
     settings: Settings,
     source_path: str,
@@ -422,6 +442,10 @@ def ingest_command(
     orchestrator, driver = build_orchestrator(
         settings, repeat_mode=effective_mode,
         novelty_filter=_novelty_filter_for(settings, no_novelty_filter))
+    # Issue #101 mis-shape dispatch shares the novelty gate's key and opt-out;
+    # set on the composed orchestrator so patched build_orchestrator fakes in
+    # tests keep their signature.
+    orchestrator.dispatcher = _dispatcher_for(settings, no_novelty_filter)
     if input_fn is not None:
         review_input: Callable[[str], str] = input_fn
     elif yes:

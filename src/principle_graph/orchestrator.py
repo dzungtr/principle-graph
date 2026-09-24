@@ -20,6 +20,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from .dispatch import (
+    Dropped,
+    DispatchError,
+    Dispatcher,
+    classify_candidate,
+    dispatch as dispatch_candidate,
+)
 from .extraction import ExtractionRun, SequentialExtractor
 from .extraction_contract import Chunk, chunk_markdown, chunk_pdf
 from .novelty import NoveltyFilter, apply_novelty_filter
@@ -100,6 +107,13 @@ class IngestStats:
     # consolidation call; zeroed when no scanner is wired.
     scan_calls: int = 0
     consolidation_calls: int = 0
+    # Issue #101 mis-shape dispatch: guards classify, Jev decides, pipeline
+    # executes. Zeroed when the dispatcher is opted out.
+    dispatch_calls: int = 0
+    dispatch_bypassed: int = 0
+    dispatch_dropped: int = 0
+    dispatch_step_counts: Mapping[str, int] = field(default_factory=dict)
+    dispatch_flagged_notes: tuple[str, ...] = ()
 
     def render(self) -> str:
         committed_lines = [
@@ -160,6 +174,17 @@ class IngestStats:
             committed_lines.append(
                 f"scan calls: {self.scan_calls} "
                 f"(consolidation calls: {self.consolidation_calls})")
+        if self.dispatch_calls or self.dispatch_bypassed or self.dispatch_dropped \
+                or self.dispatch_flagged_notes:
+            steps = ", ".join(f"{step}={count}"
+                               for step, count in sorted(self.dispatch_step_counts.items()))
+            committed_lines.append(
+                f"dispatch: {self.dispatch_calls} calls, "
+                f"{self.dispatch_bypassed} bypassed, "
+                f"{self.dispatch_dropped} dropped"
+                + (f"; steps: {steps}" if steps else ""))
+            for note in self.dispatch_flagged_notes:
+                committed_lines.append(f"  - flagged: {note}")
         committed_lines.append(
             f"elapsed seconds: {self.elapsed_seconds:.3f}",
         )
@@ -202,6 +227,7 @@ class IngestOrchestrator:
         state_registry: "Any | None" = None,
         entity_registry: "LabelRegistry | None" = None,
         scanner: "Any | None" = None,
+        dispatcher: "Dispatcher | None" = None,
     ) -> None:
         self.extractor = extractor
         self.store = store
@@ -221,6 +247,9 @@ class IngestOrchestrator:
         # every chunk prompt. A scan failure raises out of run() — the ingest
         # aborts before any extraction or write (fail-fast, no partial state).
         self.scanner = scanner
+        # Issue #101 mis-shape dispatch: ``None`` opts the seam out entirely
+        # (novelty-filter precedent) — guards do not run and nothing dispatches.
+        self.dispatcher = dispatcher
 
     def run(
         self,
@@ -244,6 +273,16 @@ class IngestOrchestrator:
             scan_calls = scan.scan_calls
             consolidation_calls = scan.consolidation_calls
         run = self._extract(chunk_list, verb_menu=verb_menu, entity_roster=entity_roster)
+        # Issue #101 mis-shape dispatch: after extract, before the novelty gate
+        # (shaping before admission). Well-formed triples bypass entirely. A
+        # dispatcher outage raises DispatchError out of ``run`` — hard abort,
+        # no partial state.
+        dispatch_stats = {
+            "calls": 0, "bypassed": 0, "dropped": 0,
+            "steps": {}, "flagged": [],
+        }
+        if self.dispatcher is not None:
+            self._dispatch(run, {c.source_ref: c for c in chunk_list}, dispatch_stats)
         # ADR-0006 novelty gate: after extract, before resolve. ``None`` (opt-out)
         # keeps the current behavior with zero Jev calls. A filter failure raises
         # out of ``run`` — the ingest aborts with no partial state.
@@ -275,7 +314,13 @@ class IngestOrchestrator:
         # Render ambiguity queue as review notes on the delta. We always default
         # to create-new: never auto-merge ambiguous candidates.
         delta, ambiguity_notes = self._annotate_ambiguity(delta, resolution)
-        review = review_and_commit(delta, self.writer, input_fn=input_fn or (lambda _prompt: "approve"))
+        # Issue #101 fix round 1: flagged candidates surface at the Mode-2
+        # review checkpoint — before the approve/reject prompt — so the human
+        # reviewer sees what dispatch declined to reshape (PRD #95 story 23).
+        review = review_and_commit(
+            delta, self.writer,
+            input_fn=input_fn or (lambda _prompt: "approve"),
+            flagged_notes=tuple(dispatch_stats["flagged"]))
         committed_entities = len(delta.new_entities)
         committed_edges = len(delta.new_edges) + len(delta.updated_edges)
         verdict = "rejected" if review.rejected else "approved"
@@ -315,6 +360,11 @@ class IngestOrchestrator:
             unknown_state_keys=tuple(sorted(self._unknown_state_key_counts.items())),
             scan_calls=scan_calls,
             consolidation_calls=consolidation_calls,
+            dispatch_calls=dispatch_stats["calls"],
+            dispatch_bypassed=dispatch_stats["bypassed"],
+            dispatch_dropped=dispatch_stats["dropped"],
+            dispatch_step_counts=dict(dispatch_stats["steps"]),
+            dispatch_flagged_notes=tuple(dispatch_stats["flagged"]),
         )
         return IngestResult(stats=stats, delta=delta, review=review, graph=self.writer)
 
@@ -325,6 +375,67 @@ class IngestOrchestrator:
         if not verb_menu and not entity_roster:
             return self.extractor.run(chunks)
         return self.extractor.run(chunks, verb_menu=verb_menu, entity_roster=entity_roster)
+
+    def _dispatch(self, run: ExtractionRun, chunk_by_ref: Mapping[str, Chunk],
+                  stats: dict[str, Any]) -> None:
+        """Classify every extracted triple; dispatch flagged ones (issue #101).
+
+        Guards classify only. Flag-free candidates bypass with zero dispatch
+        calls (bypass counter). Repaired triples re-enter the candidate stream
+        with shared evidence; repaired states flow through the state path;
+        ``drop_noise`` and invalid payloads land in the rejected log with a
+        verdict. A dispatcher outage propagates :class:`DispatchError` — the
+        ingest hard-aborts before any novelty call, resolution, or write.
+        """
+        kept: list[dict[str, Any]] = []
+        for candidate in run.candidates:
+            classes = classify_candidate(candidate)
+            if not classes:
+                stats["bypassed"] += 1
+                kept.append(candidate)
+                continue
+            guard_class = classes[0]
+            chunk = chunk_by_ref.get(candidate["source_ref"])
+            if chunk is None:
+                raise DispatchError(
+                    f"dispatch grounding lost: no chunk for {candidate['source_ref']!r}")
+            stats["calls"] += 1
+            result = dispatch_candidate(candidate, guard_class, chunk, self.dispatcher)
+            if isinstance(result, Dropped):
+                stats["dropped"] += 1
+                stats["steps"][result.verdict] = stats["steps"].get(result.verdict, 0) + 1
+                self._record_dispatch_rejection(candidate, guard_class, result)
+                continue
+            stats["steps"][result.step] = stats["steps"].get(result.step, 0) + 1
+            kept.extend(result.triples)
+            run.state_candidates.extend(result.states)
+            for record in result.flagged:
+                stats["flagged"].append(record["reason"])
+            for record in result.rejected:
+                # Partially-invalid member lists: valid repairs flow; each
+                # skipped member gets an auditable rejected-log record.
+                stats["dropped"] += 1
+                stats["steps"]["skipped_members"] = stats["steps"].get("skipped_members", 0) + 1
+                record_rejected = getattr(self.writer, "record_rejected", None)
+                if callable(record_rejected):
+                    record_rejected(record)
+        run.candidates = kept
+
+    def _record_dispatch_rejection(self, candidate: Mapping[str, Any],
+                                   guard_class: str, dropped) -> None:
+        """Auditable rejected-log record for ``drop_noise`` / invalid payloads."""
+        record_rejected = getattr(self.writer, "record_rejected", None)
+        if not callable(record_rejected):
+            return
+        record_rejected({
+            "candidate": dict(candidate),
+            "guard_class": guard_class,
+            "step": "drop_noise" if dropped.verdict == "drop_noise" else "invalid_payload",
+            "source_ref": candidate.get("source_ref", ""),
+            "decision": "rejected",
+            "verdict": dropped.verdict,
+            "reason": dropped.reason,
+        })
 
     def _extraction_calls(self, run: ExtractionRun) -> int:
         """Per-chunk model invocations: one ``client.create`` call per completed chunk."""
