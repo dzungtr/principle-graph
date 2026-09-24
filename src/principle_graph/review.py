@@ -14,6 +14,9 @@ class GraphEntity:
     name: str
     entity_type: str
     embedding: tuple[float, ...] | None = None
+    # Issue #99: merged surface forms accumulated on the canonical entity;
+    # persisted as the ``aliases`` node property.
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

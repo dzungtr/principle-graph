@@ -149,6 +149,7 @@ class IngestOrchestrator:
         edge_loader: ExistingEdgeLoader | None = None,
         rejected_log_path: str = ".pg/rejected.jsonl",
         novelty_filter: "NoveltyFilter | None" = None,
+        entity_registry: Any = None,
     ) -> None:
         self.extractor = extractor
         self.store = store
@@ -157,6 +158,8 @@ class IngestOrchestrator:
         self.edge_loader = edge_loader
         self.rejected_log_path = rejected_log_path
         self.novelty_filter = novelty_filter
+        # Issue #99: entity-type registry applied before matching.
+        self.entity_registry = entity_registry
 
     def run(
         self,
@@ -241,7 +244,8 @@ class IngestOrchestrator:
         v1 spec amendment. The ambiguity item is preserved for stats/review notes.
         """
         registry = SessionRegistry()
-        resolver = EntityResolver(self.store, self.embedder, registry)
+        resolver = EntityResolver(self.store, self.embedder, registry,
+                                  entity_registry=self.entity_registry)
         pairs: list[tuple[dict[str, Any], Any]] = []
         for candidate in run.candidates:
             subject = resolver.resolve(candidate["subject"], candidate["subject_type"],
@@ -275,9 +279,11 @@ class IngestOrchestrator:
             s_type = s_resolution.canonical.type
             o_type = o_resolution.canonical.type
             entity_map[s_name] = GraphEntity(s_name, s_type,
-                                              embedding=tuple(s_resolution.canonical.embedding) if s_resolution.canonical.embedding else None)
+                                              embedding=tuple(s_resolution.canonical.embedding) if s_resolution.canonical.embedding else None,
+                                              aliases=tuple(s_resolution.canonical.aliases))
             entity_map[o_name] = GraphEntity(o_name, o_type,
-                                              embedding=tuple(o_resolution.canonical.embedding) if o_resolution.canonical.embedding else None)
+                                              embedding=tuple(o_resolution.canonical.embedding) if o_resolution.canonical.embedding else None,
+                                              aliases=tuple(o_resolution.canonical.aliases))
             edges.append(GraphEdge(
                 s_name, candidate["relation"].upper(), o_name,
                 candidate["confidence"], candidate["source_ref"],

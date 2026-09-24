@@ -75,7 +75,57 @@ def test_graph_writer_upserts_entity_with_timestamps_and_embedding():
     assert "MERGE (e:Entity {name: $name, type: $type})" in query
     assert "ON CREATE SET e.created_at" in query
     assert "ON MATCH SET e.updated_at" in query
-    assert params == {"name": "Marie Curie", "type": "Person", "embedding": [0.1, 0.2]}
+    assert params == {"name": "Marie Curie", "type": "Person",
+                      "embedding": [0.1, 0.2], "aliases": []}
+
+
+def test_graph_writer_canonicalizes_entity_type_and_persists_aliases():
+    from principle_graph.label_registry import LabelEntry, LabelRegistry
+    registry = LabelRegistry(1, {"person": LabelEntry("person", ("politician",), None, "")})
+    driver = RecordingDriver()
+    writer = Neo4jGraphWriter(driver, database="neo4j", entity_registry=registry)
+
+    writer.upsert_entity(GraphEntity("Friedrich Merz", "politician",
+                                     aliases=("Merz",)))
+
+    (session,) = driver.sessions
+    [(query, params)] = session.queries
+    assert params["type"] == "person"  # same canonical key the resolver matched on
+    assert params["aliases"] == ["Merz"]
+    assert "e.aliases = CASE WHEN $aliases = []" in query
+    assert writer.unknown_entity_type_counts == {}
+
+
+def test_graph_writer_flags_unknown_entity_type_at_write_boundary():
+    from principle_graph.label_registry import LabelEntry, LabelRegistry
+    registry = LabelRegistry(1, {"person": LabelEntry("person", (), None, "")})
+    driver = RecordingDriver()
+    writer = Neo4jGraphWriter(driver, database="neo4j", entity_registry=registry)
+
+    writer.upsert_entity(GraphEntity("Obscurity", "xenosophy"))
+
+    (session,) = driver.sessions
+    [(_, params)] = session.queries
+    assert params["type"] == "xenosophy"  # pass-through flagged, never rejected
+    assert writer.unknown_entity_type_counts == {"xenosophy": 1}
+
+
+def test_entity_store_containment_prefilter_and_alias_append():
+    driver = RecordingDriver(rows=[{"node": {"name": "Friedrich Merz",
+                                             "type": "person",
+                                             "aliases": []}}])
+    store = Neo4jEntityStore(driver, database="neo4j")
+
+    candidates = store.containment_candidates("Merz", "person")
+    assert [c.name for c in candidates] == ["Friedrich Merz"]
+    store.add_alias(Entity("e1", "Friedrich Merz", "person"), "Merz")
+
+    prefilter_query, prefilter_params = driver.sessions[0].queries[0]
+    assert "MATCH (e:Entity {type: $type})" in prefilter_query
+    assert prefilter_params["tokens"] == ["merz"]
+    alias_query, alias_params = driver.sessions[1].queries[0]
+    assert "NOT a IN coalesce(e.aliases, [])" in alias_query
+    assert alias_params == {"name": "Friedrich Merz", "type": "person", "alias": "Merz"}
 
 
 def test_graph_writer_upserts_edge_with_uppercase_relation_and_provenance():

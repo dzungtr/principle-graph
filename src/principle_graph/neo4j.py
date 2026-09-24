@@ -16,7 +16,7 @@ from .label_registry import (
 from .ledger import LedgerRow, plan_ledger_writes, resolve_repeat_mode, source_id_of
 from .normalization import plan_normalization
 from .reduction import GraphEdge, GraphEntity
-from .resolution import Entity, SimilarEntity
+from .resolution import Entity, SimilarEntity, normalize_name
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,7 @@ class Neo4jGraphWriter:
         repeat_mode: str = "keep-first",
         relation_registry: LabelRegistry | None = None,
         domain_registry: LabelRegistry | None = None,
+        entity_registry: LabelRegistry | None = None,
     ) -> None:
         self.driver = driver
         self.database = database
@@ -104,6 +105,14 @@ class Neo4jGraphWriter:
         # counted per occurrence for the run summary (PRD #76).
         self.unknown_relation_counts: dict[str, int] = {}
         self._warned_unknown: set[str] = set()
+        # Issue #99: unknown entity types pass through flagged, warned once per
+        # distinct type, counted per occurrence for the run summary.
+        self.unknown_entity_type_counts: dict[str, int] = {}
+        self._warned_unknown_entity_type: set[str] = set()
+        # Entity-type registry (issue #96): used for write-path type
+        # canonicalization so the persisted type always matches what the
+        # resolver matched on (issue #99).
+        self.entity_registry = entity_registry
 
     def _canonicalize_for_write(
         self, subject: str, relation: str, object_: str
@@ -152,11 +161,32 @@ class Neo4jGraphWriter:
         return canonical
 
     def upsert_entity(self, entity: GraphEntity) -> None:
+        # Issue #99 write-boundary consistency: the entity type is registry-
+        # canonicalized here too, so the resolved/matched type (read key) and
+        # the persisted type (write key ``type``) are always the same canonical
+        # spelling. Unknown types pass through flagged, never rejected.
+        raw_type = entity.entity_type
+        entity_type = (
+            entity.entity_type if self.entity_registry is None
+            else self.entity_registry.canonical_for(raw_type)
+        )
+        if self.entity_registry is not None and not self.entity_registry.is_known(raw_type):
+            self.unknown_entity_type_counts[entity_type] = (
+                self.unknown_entity_type_counts.get(entity_type, 0) + 1)
+            if entity_type not in self._warned_unknown_entity_type:
+                self._warned_unknown_entity_type.add(entity_type)
+                logger.warning(
+                    "unregistered entity type %r passed through uncanonicalized; "
+                    "add it (or an alias) to the entity registry to consolidate it",
+                    entity_type,
+                )
         query = (
             "MERGE (e:Entity {name: $name, type: $type}) "
             "ON CREATE SET e.created_at = datetime(), e.updated_at = datetime() "
             "ON MATCH SET e.updated_at = datetime() "
-            "SET e.embedding = CASE WHEN $embedding IS NULL THEN e.embedding ELSE $embedding END"
+            "SET e.embedding = CASE WHEN $embedding IS NULL THEN e.embedding ELSE $embedding END, "
+            "e.aliases = CASE WHEN $aliases = [] THEN e.aliases "
+            "ELSE coalesce(e.aliases, []) + [a IN $aliases WHERE NOT a IN coalesce(e.aliases, [])] END"
         )
         embedding = getattr(entity, "embedding", None)
         if embedding is not None:
@@ -165,8 +195,9 @@ class Neo4jGraphWriter:
             session.run(
                 query,
                 name=entity.name,
-                type=entity.entity_type,
+                type=entity_type,
                 embedding=embedding,
+                aliases=list(getattr(entity, "aliases", ()) or ()),
             )
 
     def upsert_edge(self, edge: GraphEdge) -> None:
@@ -857,6 +888,30 @@ class Neo4jEntityStore:
                     type=entity_type,
                 )
             ]
+
+    # Issue #99: token-overlap prefilter for containment matching. The exact
+    # containment subset check happens in resolution.containment_matches; this
+    # query only narrows the candidate set (shared token or token inside name).
+    def containment_candidates(self, name: str, entity_type: str) -> Sequence[Entity]:
+        tokens = [t for t in normalize_name(name).split() if t]
+        query = (
+            "MATCH (e:Entity {type: $type}) "
+            "WHERE any(t IN $tokens WHERE t IN split(toLower(e.name), ' ')) "
+            "OR any(t IN split(toLower(e.name), ' ') WHERE t IN $name) "
+            "RETURN e AS node LIMIT 100"
+        )
+        with self.driver.session(database=self.database) as session:
+            return [_entity(row["node"]) for row in session.run(
+                query, type=entity_type, tokens=tokens, name=normalize_name(name))]
+
+    def add_alias(self, entity: Entity, alias: str) -> None:
+        query = (
+            "MATCH (e:Entity {name: $name, type: $type}) "
+            "SET e.aliases = coalesce(e.aliases, []) "
+            "+ [a IN [$alias] WHERE NOT a IN coalesce(e.aliases, [])]"
+        )
+        with self.driver.session(database=self.database) as session:
+            session.run(query, name=entity.name, type=entity.type, alias=alias)
 
     def structural_corroboration(
         self, entity: Entity, neighbors: Sequence[tuple[str, str]]

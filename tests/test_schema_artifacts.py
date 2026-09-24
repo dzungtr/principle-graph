@@ -70,6 +70,13 @@ class SchemaArtifactTests(unittest.TestCase):
     def test_spec_moves_evidence_off_the_arrow(self):
         self.assertNotIn("`evidence` | list<string> | yes", SPEC)
 
+    def test_spec_defines_entity_aliases_and_type_canonicalization(self):
+        # Issue #99: merged surface forms accumulate on the canonical entity;
+        # type canonicalization happens before matching and at the write boundary.
+        self.assertIn("`aliases`", SPEC)
+        self.assertIn("entity-registry.yaml", SPEC)
+        self.assertIn("before matching", SPEC)
+
 
 if __name__ == "__main__":
     unittest.main()
