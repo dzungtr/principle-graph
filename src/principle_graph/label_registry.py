@@ -57,9 +57,12 @@ class LabelEntry:
 class LabelRegistry:
     """Immutable lookup over one loaded registry file."""
 
-    def __init__(self, version: int, labels: dict[str, LabelEntry]) -> None:
+    def __init__(
+        self, version: int, labels: dict[str, LabelEntry], staged: tuple[str, ...] = ()
+    ) -> None:
         self.version = version
         self._labels = dict(labels)
+        self._staged = tuple(sorted(staged))
         self._alias_to_canonical: dict[str, str] = {}
         for canonical, entry in labels.items():
             for alias in entry.aliases:
@@ -96,6 +99,15 @@ class LabelRegistry:
         """The canonical vocabulary, sorted — for query-time prompt embedding."""
         return tuple(sorted(self._labels))
 
+    def staged_labels(self) -> tuple[str, ...]:
+        """Labels from the ``proposed:`` staging section, sorted.
+
+        Staged labels participate in canonicalization exactly like promoted
+        labels (issue #96); promotion to the ``labels:`` section is a git
+        review over this set.
+        """
+        return self._staged
+
     def entry(self, label: str) -> LabelEntry:
         return self._labels[str(label).strip().lower()]
 
@@ -108,6 +120,16 @@ def default_registry_path() -> Path:
 def default_domain_registry_path() -> Path:
     """The packaged domain registry (PRD #76 slice #78); same loader contract."""
     return Path(__file__).parent / "data" / "domain-registry.yaml"
+
+
+def default_entity_registry_path() -> Path:
+    """The packaged entity-type registry (issue #96); same loader contract."""
+    return Path(__file__).parent / "data" / "entity-registry.yaml"
+
+
+def default_state_registry_path() -> Path:
+    """The packaged state-key registry (issue #96); same loader contract."""
+    return Path(__file__).parent / "data" / "state-registry.yaml"
 
 
 def load_label_registry(path: str | Path) -> LabelRegistry:
@@ -125,15 +147,31 @@ def load_label_registry(path: str | Path) -> LabelRegistry:
 
     labels: dict[str, LabelEntry] = {}
     for name, spec in document["labels"].items():
-        aliases = tuple(spec.get("aliases", ()))
-        inverse = spec.get("inverse")
-        labels[name] = LabelEntry(
-            canonical=name,
-            aliases=aliases,
-            inverse=inverse,
-            description=str(spec.get("description", "")),
-        )
-    return LabelRegistry(int(document["version"]), labels)
+        labels[name] = _entry_from_spec(name, spec)
+
+    # `proposed:` staging (issue #96): scan-discovered labels that participate
+    # in canonicalization immediately; promotion is a git-reviewed data edit.
+    staged_names: tuple[str, ...] = ()
+    proposed = document.get("proposed")
+    if proposed is not None:
+        for name, spec in proposed["labels"].items():
+            if name in labels:
+                raise RegistryError(
+                    f"malformed registry file {path}: staged label {name!r} "
+                    "collides with a canonical label"
+                )
+            labels[name] = _entry_from_spec(name, spec)
+        staged_names = tuple(proposed["labels"])
+    return LabelRegistry(int(document["version"]), labels, staged_names)
+
+
+def _entry_from_spec(name: str, spec: dict[str, Any]) -> LabelEntry:
+    return LabelEntry(
+        canonical=name,
+        aliases=tuple(spec.get("aliases") or ()),
+        inverse=spec.get("inverse"),
+        description=str(spec.get("description", "")),
+    )
 
 
 def _validate_document(document: Any, path: Path) -> None:
@@ -142,8 +180,10 @@ def _validate_document(document: Any, path: Path) -> None:
 
     if not isinstance(document, dict):
         raise fail("top level must be a mapping with 'version' and 'labels'")
-    if set(document) - {"version", "labels"}:
-        raise fail(f"unexpected top-level keys: {sorted(set(document) - {'version', 'labels'})}")
+    if set(document) - {"version", "labels", "proposed"}:
+        raise fail(
+            f"unexpected top-level keys: {sorted(set(document) - {'version', 'labels', 'proposed'})}"
+        )
     version = document.get("version")
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
         raise fail("'version' must be a positive integer")
@@ -151,6 +191,29 @@ def _validate_document(document: Any, path: Path) -> None:
     if not isinstance(labels, dict) or not labels:
         raise fail("'labels' must be a non-empty mapping")
 
+    proposed = document.get("proposed")
+    if proposed is not None:
+        if not isinstance(proposed, dict) or set(proposed) - {"labels"}:
+            raise fail("'proposed' must be a mapping with only a 'labels' key")
+        staged = proposed.get("labels")
+        if not isinstance(staged, dict):
+            raise fail("'proposed.labels' must be a mapping")
+
+    _validate_label_entries(labels, fail)
+    merged = labels
+    if proposed is not None:
+        staged = proposed["labels"]
+        _validate_label_entries(staged, fail)
+        for name in staged:
+            if name in labels:
+                raise fail(f"staged label {name!r} collides with a canonical label")
+        merged = {**labels, **staged}
+    # Alias and inverse-pair constraints hold across the canonical + staged
+    # namespace: lookup must be deterministic regardless of promotion state.
+    _validate_label_namespace(merged, fail)
+
+
+def _validate_label_entries(labels: dict[str, Any], fail) -> None:
     for name, spec in labels.items():
         if not isinstance(name, str) or not _LABEL.fullmatch(name):
             raise fail(f"label {name!r} is not lowercase snake_case")
@@ -177,6 +240,8 @@ def _validate_document(document: Any, path: Path) -> None:
         if not isinstance(description, str):
             raise fail(f"label {name!r} description must be a string")
 
+
+def _validate_label_namespace(labels: dict[str, Any], fail) -> None:
     seen_aliases: dict[str, str] = {}
     for name, spec in labels.items():
         for alias in spec.get("aliases") or []:
@@ -207,6 +272,8 @@ __all__ = [
     "LabelRegistry",
     "RegistryError",
     "default_domain_registry_path",
+    "default_entity_registry_path",
     "default_registry_path",
+    "default_state_registry_path",
     "load_label_registry",
 ]

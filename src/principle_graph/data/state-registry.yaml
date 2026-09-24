@@ -1,0 +1,74 @@
+# State-key registry (issue #96): canonical measurement keys for `propose_state`
+# assertions on entities.
+#
+# Loaded by the same generic label-registry loader as the relation registry
+# (ADR-0003); no second registry implementation. Unknown keys pass through
+# flagged, never rejected (PRD #95 never-reject stance); storage follows
+# ADR-0007's `:StateEvent` ledger.
+#
+# Rules:
+# - keys and aliases are lowercase snake_case (extraction-contract label shape);
+# - `inverse` is not used for state keys — never declare it;
+# - `proposed:` staging follows the relation-registry semantics (issue #96);
+# - unknown keys are not listed here — they pass through as-is.
+version: 1
+labels:
+  approval_rating:
+    aliases: [popularity, support_rating, public_support]
+    description: Public approval of an actor, as a percentage.
+  vote_share:
+    aliases: [election_result, poll_share, polling]
+    description: Share of votes or poll support, as a percentage.
+  policy_rate:
+    aliases: [interest_rate, benchmark_rate, base_rate, discount_rate]
+    description: A central bank's key lending rate, as a percentage.
+  short_term_borrowing:
+    aliases: [borrowing, debt_issuance, financing_need]
+    description: Planned or actual short-term debt issuance, in currency.
+  trade_volume:
+    aliases: [trade, exports, imports, trade_flow]
+    description: Volume or value of trade, in currency or units.
+  inflation_rate:
+    aliases: [cpi, consumer_prices, price_growth]
+    description: Rate of price increase, as a percentage.
+  gdp_growth:
+    aliases: [growth_rate, economic_growth, gdp]
+    description: Economic output growth, as a percentage or currency.
+  unemployment_rate:
+    aliases: [joblessness, unemployment]
+    description: Share of the labor force without work, as a percentage.
+  debt_to_gdp:
+    aliases: [debt_ratio, debt_burden]
+    description: Public debt relative to output, as a percentage.
+  budget_deficit:
+    aliases: [fiscal_deficit, deficit, budget_balance]
+    description: Government shortfall, in currency or percentage of output.
+  exchange_rate:
+    aliases: [fx_rate, currency_rate]
+    description: One currency's value against another.
+  bond_yield:
+    aliases: [yield, treasury_yield, rates]
+    description: Return on government debt, as a percentage.
+  military_spending:
+    aliases: [defense_budget, defense_spending]
+    description: Military expenditure, in currency or percentage of output.
+  tariff_rate:
+    aliases: [duty_rate, customs_rate]
+    description: Duty levied on imports, as a percentage.
+  energy_price:
+    aliases: [oil_price, gas_price, power_price]
+    description: Price of an energy commodity, in currency per unit.
+  market_cap:
+    aliases: [market_value, valuation]
+    description: Total market value of an entity, in currency.
+  consumer_confidence:
+    aliases: [sentiment, confidence_index]
+    description: Household economic sentiment, as an index.
+  migration_volume:
+    aliases: [migration, immigration_flow]
+    description: People moving across a border, in persons.
+  population:
+    aliases: [headcount, population_size]
+    description: Number of people, in persons.
+proposed:
+  labels: {}

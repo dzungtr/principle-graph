@@ -42,14 +42,180 @@ def _load(tmp_path: Path, text: str) -> object:
     return load_label_registry(path)
 
 
+# --- Entity-type registry (issue #96): same loader, no second implementation ---
+
+
+def test_packaged_entity_registry_loads_through_the_shared_loader():
+    from principle_graph.label_registry import default_entity_registry_path
+    entity_registry = load_label_registry(default_entity_registry_path())
+    assert entity_registry.version >= 1
+    canonical = set(entity_registry.vocabulary())
+    assert canonical == {
+        "person", "organization", "country", "place", "event", "policy",
+        "agreement", "product", "technology", "market", "metric", "concept",
+    }
+
+
+def test_entity_type_aliases_collapse_to_canonical():
+    from principle_graph.label_registry import default_entity_registry_path
+    entity_registry = load_label_registry(default_entity_registry_path())
+    assert entity_registry.canonical_for("politician") == "person"
+    assert entity_registry.canonical_for("geopolitical_entity") == "organization"
+    assert entity_registry.canonical_for("central_bank") == "organization"
+    assert entity_registry.is_known("treaty")
+
+
+def test_unknown_entity_type_passes_through_unchanged():
+    from principle_graph.label_registry import default_entity_registry_path
+    entity_registry = load_label_registry(default_entity_registry_path())
+    assert entity_registry.canonical_for("xenosophy") == "xenosophy"
+    assert not entity_registry.is_known("xenosophy")
+
+
+# --- State-key registry (issue #96): same loader, no second implementation ---
+
+
+def test_packaged_state_registry_loads_through_the_shared_loader():
+    from principle_graph.label_registry import default_state_registry_path
+    state_registry = load_label_registry(default_state_registry_path())
+    assert state_registry.version >= 1
+    for key in (
+        "approval_rating", "vote_share", "policy_rate",
+        "short_term_borrowing", "trade_volume",
+    ):  # named in issue #96
+        assert key in state_registry.vocabulary(), key
+
+
+def test_state_key_aliases_collapse_and_unknown_keys_pass():
+    from principle_graph.label_registry import default_state_registry_path
+    state_registry = load_label_registry(default_state_registry_path())
+    assert state_registry.canonical_for("popularity") == "approval_rating"
+    assert state_registry.canonical_for("unheard_of_metric") == "unheard_of_metric"
+    assert not state_registry.is_known("unheard_of_metric")
+
+
 # --- the packaged registry ---------------------------------------------------
 
 
 def test_packaged_registry_loads_with_version_and_vocabulary(registry):
-    assert registry.version == 1
+    assert registry.version >= 1
     assert "supersedes" in registry.vocabulary()
     assert "reduces" in registry.vocabulary()
     assert registry.vocabulary() == tuple(sorted(registry.vocabulary()))
+
+
+def test_packaged_registry_spans_six_facets_with_about_30_verbs(registry):
+    # issue #96: ~30 canonical verbs across causal, structural, temporal/event,
+    # control/economic, epistemic, and comparative/constraint facets.
+    assert 25 <= len(registry.vocabulary()) <= 35
+    facets = [
+        "causes",          # causal
+        "part_of",         # structural
+        "precedes",        # temporal/event
+        "funds",           # control/economic
+        "declared",        # epistemic
+        "exceeds",         # comparative/constraint
+    ]
+    for facet_probe in facets:
+        assert facet_probe in registry.vocabulary(), facet_probe
+
+
+@pytest.mark.parametrize("raw,canonical", [
+    ("CAUSED", "causes"),
+    ("DECLARED", "declared"),
+    ("VISITED", "visited"),
+    ("COVERS", "includes"),
+    ("INCLUDE", "includes"),
+    ("PREDICTED", "predicts"),
+    ("DESCRIBED_AS", "described_as"),
+    ("EXPECTS", "expects"),
+])
+def test_demo_corpus_raw_verbs_normalize(registry, raw, canonical):
+    # issue #96: verbs observed in the demo corpus alias-map onto canonicals.
+    assert registry.canonical_for(raw) == canonical
+    assert registry.is_known(raw)
+
+
+# --- `proposed:` staging (issue #96) -----------------------------------------
+
+
+def test_staged_verbs_participate_in_canonicalization_immediately(tmp_path):
+    # Scan-discovered verbs land in the staging section and canonicalize like
+    # any promoted verb — appending is a pure data-file edit, no code change.
+    registry = _load(tmp_path, """
+version: 1
+labels:
+  causes:
+    description: Subject brings the object about.
+proposed:
+  labels:
+    ghosted:
+      aliases: [ghosted_out]
+      description: Scan-discovered; awaiting git-review promotion.
+""")
+    assert registry.is_known("ghosted")
+    assert registry.canonical_for("ghosted_out") == "ghosted"
+    assert "ghosted" in registry.vocabulary()
+    assert registry.staged_labels() == ("ghosted",)
+
+
+def test_staged_labels_are_distinguishable_from_promoted_labels(tmp_path):
+    registry = _load(tmp_path, """
+version: 1
+labels:
+  causes: {}
+proposed:
+  labels:
+    ghosted: {}
+""")
+    assert "causes" not in registry.staged_labels()
+    assert set(registry.staged_labels()) == {"ghosted"}
+    assert set(registry.vocabulary()) == {"causes", "ghosted"}
+
+
+def test_staged_section_colliding_with_canonical_labels_is_rejected(tmp_path):
+    with pytest.raises(RegistryError, match="collides with a canonical"):
+        _load(tmp_path, """
+version: 1
+labels:
+  causes: {}
+proposed:
+  labels:
+    causes: {}
+""")
+
+
+def test_staged_alias_colliding_with_canonical_alias_is_rejected(tmp_path):
+    with pytest.raises(RegistryError, match="claimed by both"):
+        _load(tmp_path, """
+version: 1
+labels:
+  a: {aliases: [shared]}
+  b: {}
+proposed:
+  labels:
+    c: {aliases: [shared]}
+""")
+
+
+def test_staged_inverse_pair_against_promoted_label_resolves(tmp_path):
+    registry = _load(tmp_path, """
+version: 1
+labels:
+  causes:
+    inverse: caused_by
+  caused_by:
+    description: collapses to causes.
+proposed:
+  labels:
+    triggered:
+      inverse: triggered_by
+    triggered_by:
+      description: staged pair, declarer is triggered.
+""")
+    canon = registry.canonicalize("a", "triggered_by", "b")
+    assert (canon.subject, canon.relation, canon.object) == ("b", "triggered", "a")
+
 
 
 def test_packaged_registry_documented_inverse_pairs_are_balanced(registry):

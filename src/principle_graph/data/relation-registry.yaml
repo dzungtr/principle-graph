@@ -1,4 +1,5 @@
-# Relation registry (ADR-0003): canonical verbs for the write boundary.
+# Relation registry (ADR-0003, expanded per issue #96): canonical verbs for
+# the write boundary.
 #
 # Deterministic alias + inverse-pair normalization applied by Neo4jGraphWriter
 # before any Cypher is generated. The LLM's original verb is preserved on the
@@ -10,22 +11,87 @@
 # - keys and aliases are lowercase snake_case (extraction-contract label shape);
 # - `inverse` marks the canonical direction of a pair: declare it on exactly
 #   one member; edges spelled with the other member flip to the declarer;
-# - unknown verbs are not listed here — they pass through as-is.
+# - unknown verbs are not listed here — they pass through as-is;
+# - `proposed:` staging (issue #96): scan-discovered verbs are appended under
+#   `proposed.labels` with the same entry shape, participate in
+#   canonicalization immediately, and are promoted to `labels:` via git review
+#   — appending is a pure data-file edit, no code change.
+#
+# Facets: causal, structural, temporal/event, control/economic, epistemic,
+# comparative/constraint.
 version: 1
 labels:
-  increases:
-    aliases: [raises]
-    inverse: reduces
-    description: Subject pushes the object quantity up.
-  reduces:
-    aliases: [eases, lowers]
-    description: Subject pushes the object quantity down.
-  supersedes:
-    aliases: [replaces]
-    inverse: superseded_by
-    description: A later claim displaces the earlier one.
-  superseded_by:
-    description: This claim was displaced by the object claim; collapses to supersedes.
+  # --- causal ---
+  causes:
+    aliases: [caused, leads_to, results_in]
+    inverse: caused_by
+    description: Subject brings the object state or event about.
+  caused_by:
+    description: Subject is brought about by the object; collapses to causes.
+  # --- structural ---
+  part_of:
+    inverse: has_part
+    description: Subject is a component of the object whole.
+  has_part:
+    description: Whole contains the subject as a part; collapses to part_of.
+  includes:
+    aliases: [include, covers, contains, encompasses]
+    inverse: included_in
+    description: Subject's scope spans the object.
+  included_in:
+    description: Subject falls within the object's scope; collapses to includes.
+  operates_in:
+    aliases: [based_in, active_in]
+    description: Subject acts or exists within the object arena.
+  # --- temporal / event ---
+  precedes:
+    aliases: [came_before, happened_before]
+    inverse: follows
+    description: Subject happens earlier in the event order.
+  follows:
+    aliases: [came_after, followed]
+    description: Subject happens later in the event order; collapses to precedes.
+  triggers:
+    aliases: [triggered, sparked, prompted]
+    inverse: triggered_by
+    description: Subject sets the object event in motion.
+  triggered_by:
+    description: Subject event was set in motion by the object; collapses to triggers.
+  visited:
+    aliases: [visited_by, met, met_with]
+    description: Subject attended or traveled to the object event or place.
+  # --- control / economic ---
+  funds:
+    aliases: [finances, subsidized]
+    inverse: funded_by
+    description: Subject provides money to the object.
+  funded_by:
+    description: Subject receives money from the object; collapses to funds.
+  regulates:
+    aliases: [regulated, controls, restricts]
+    inverse: regulated_by
+    description: Subject sets or enforces rules binding the object.
+  regulated_by:
+    description: Subject is bound by the object's rules; collapses to regulates.
+  trades_with:
+    aliases: [traded_with, exports_to, imports_from]
+    description: Subject exchanges goods or capital with the object.
+  # --- epistemic ---
+  declared:
+    aliases: [announced, stated, declared_that, said, vowed]
+    description: Subject publicly asserts the object claim or intent.
+  described_as:
+    aliases: [described, characterized_as, labeled, called]
+    description: Subject characterizes the object with the object description.
+  expects:
+    aliases: [expected, anticipates, forecasts, projects]
+    description: Subject predicts the object outcome without asserting it.
+  predicts:
+    aliases: [predicted, predicted_at, prediction, forecasted]
+    inverse: predicted_by
+    description: A claim projects the object outcome as likely.
+  predicted_by:
+    description: Subject outcome was projected by the object claim; collapses to predicts.
   supports:
     aliases: [backs, corroborates]
     description: Evidence or reasoning backs the object claim.
@@ -35,10 +101,34 @@ labels:
     description: Subject asserts the object claim is false or holds only narrowly.
   contradicted_by:
     description: This claim is contradicted by the object claim; collapses to contradicts.
-  part_of:
-    inverse: has_part
-    description: Subject is a component of the object whole.
-  has_part:
-    description: Whole contains the subject as a part; collapses to part_of.
+  # --- comparative / constraint ---
+  exceeds:
+    aliases: [exceeded, surpasses, outpaces, more_than]
+    inverse: exceeded_by
+    description: Subject's quantity or rank is above the object's.
+  exceeded_by:
+    description: Subject is below the object's quantity or rank; collapses to exceeds.
+  constrains:
+    aliases: [constrained, limits, caps]
+    inverse: constrained_by
+    description: Subject restricts the object's range of outcomes.
+  constrained_by:
+    description: Subject is restricted by the object; collapses to constrains.
+  # --- claim lifecycle (claim-era verbs, ADR-0003) ---
+  supersedes:
+    aliases: [replaces]
+    inverse: superseded_by
+    description: A later claim displaces the earlier one.
+  superseded_by:
+    description: This claim was displaced by the object claim; collapses to supersedes.
+  increases:
+    aliases: [raises]
+    inverse: reduces
+    description: Subject pushes the object quantity up.
+  reduces:
+    aliases: [eases, lowers]
+    description: Subject pushes the object quantity down.
   depends_on:
     description: Subject requires the object to hold or function.
+proposed:
+  labels: {}
