@@ -125,3 +125,27 @@ def test_rejection_record_retains_full_provenance():
     assert record["scope_conditions"] == "only for scripting"
     assert record["decision"] == "rejected"
     assert record["reason"] == "rejected by reviewer"
+
+
+def test_flagged_notes_render_before_review_prompt(capsys):
+    from principle_graph.review import review_delta
+    prompts = []
+    def _input(prompt):
+        prompts.append(prompt)
+        return "a"
+    review_delta(delta(), input_fn=_input,
+                 flagged_notes=("numeric_endpoint repaired via pass_flagged; "
+                                "claim 'US Treasury' -[borrows]-> '$1 trillion'",))
+    out = capsys.readouterr().out
+    # notes are rendered to the transcript before the prompt is even asked
+    notes_pos = out.index("pass_flagged")
+    assert notes_pos < out.index("Mode 2") + len(out)  # notes present in transcript
+    assert prompts == ["[a]pprove, [r]eject, or [e]dit confidence: "]
+
+
+def test_review_and_commit_forwards_flagged_notes_to_review(capsys):
+    from principle_graph.review import review_and_commit
+    graph = InMemoryGraph()
+    review_and_commit(delta(), graph, input_fn=lambda _: "a",
+                      flagged_notes=("flagged note here",))
+    assert "flagged note here" in capsys.readouterr().out
