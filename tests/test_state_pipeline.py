@@ -11,8 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import pytest
-
 from principle_graph.extraction import PROPOSE_STATE_TOOL, SequentialExtractor
 from principle_graph.extraction_contract import Chunk, ContractError, validate_state
 from principle_graph.extraction import ExtractionRun
@@ -309,9 +307,6 @@ def test_render_markdown_without_states_omits_state_lines():
 
 
 def test_seed_states_degrades_without_state_seam():
-    class _PlainGraph(_StateGraph):
-        def states_for(self, entity):
-            raise AssertionError("state seam must not be consulted when absent")
     # A graph whose class simply lacks the seam: simulate via a bare object.
     class _Bare:
         entities = _StateGraph().entities
@@ -371,3 +366,64 @@ def test_orchestrator_filters_noise_states(tmp_path, monkeypatch):
     assert writer.state_events == []
     assert result.stats.states_filtered_noise == 1
     assert result.stats.states_committed == 0
+
+
+def test_orchestrator_state_novelty_failure_aborts_before_any_commit(tmp_path, monkeypatch):
+    """AC4 gate-failure parity with the triple side (PR #108 P2-3): a novelty
+    transport failure aborts the whole ingest — nothing is committed."""
+    writer = _StateLedgerWriter()
+    source = tmp_path / "s.md"
+    source.write_text("# hi\n\nx\n", encoding="utf-8")
+
+    class _BrokenFilter:
+        def classify(self, claims):
+            raise RuntimeError("novelty gateway down")
+
+    class _Extractor:
+        def run(self, chunks):
+            run = ExtractionRun()
+            run.state_candidates.append(_state_input())
+            run.completed_chunks.append("chunk-1")
+            return run
+
+    orch = IngestOrchestrator(_Extractor(), store=_Store(), embedder=None,
+                              writer=writer, novelty_filter=_BrokenFilter())
+    monkeypatch.setattr("principle_graph.orchestrator.review_and_commit",
+                        lambda delta, writer_, **kw: ReviewResult(approved=delta,
+                                                                  rejected=[]))
+    with pytest.raises(RuntimeError, match="novelty gateway down"):
+        orch.run(source)
+    assert writer.state_events == []
+
+
+def test_orchestrator_resolves_state_entity_through_entity_registry(tmp_path, monkeypatch):
+    """P1-2: a state candidate typed with a registry alias (politician →
+    person) commits against the canonical entity type, never a fragment."""
+    from principle_graph.label_registry import (
+        LabelEntry,
+        LabelRegistry,
+        default_entity_registry_path,
+        load_label_registry,
+    )
+    registry = load_label_registry(default_entity_registry_path())
+    assert registry.canonical_for("politician") == "person"
+    writer = _StateLedgerWriter()
+    source = tmp_path / "s.md"
+    source.write_text("# hi\n\nx\n", encoding="utf-8")
+
+    class _Extractor:
+        def run(self, chunks):
+            run = ExtractionRun()
+            run.state_candidates.append(_state_input(entity_type="politician"))
+            run.completed_chunks.append("chunk-1")
+            return run
+
+    orch = IngestOrchestrator(_Extractor(), store=_Store(), embedder=None,
+                              writer=writer, novelty_filter=_ApprovalFilter(),
+                              entity_registry=registry)
+    monkeypatch.setattr("principle_graph.orchestrator.review_and_commit",
+                        lambda delta, writer_, **kw: ReviewResult(approved=delta,
+                                                                  rejected=[]))
+    result = orch.run(source)
+    assert result.stats.states_committed == 1
+    assert [e.entity_type for e in writer.state_events] == ["person"]

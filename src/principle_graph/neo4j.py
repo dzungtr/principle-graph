@@ -106,11 +106,12 @@ class Neo4jGraphWriter:
         self._warned_unknown_domain: set[str] = set()
         # State keys (issue #98) share the loader contract; unknown keys pass
         # through flagged — never rejected (PRD #95 never-reject stance).
+        # Warn-once only here: the orchestrator owns per-run unknown-key
+        # accounting so one occurrence is never counted twice (PR #108 P2-2).
         self.state_registry = (
             state_registry if state_registry is not None
             else load_label_registry(default_state_registry_path())
         )
-        self.unknown_state_counts: dict[str, int] = {}
         self._warned_unknown_state: set[str] = set()
         # Unknown verbs pass through flagged: warned once per distinct verb,
         # counted per occurrence for the run summary (PRD #76).
@@ -171,14 +172,16 @@ class Neo4jGraphWriter:
                 )
         return canonical
 
-    def upsert_entity(self, entity: GraphEntity) -> None:
-        # Issue #99 write-boundary consistency: the entity type is registry-
-        # canonicalized here too, so the resolved/matched type (read key) and
-        # the persisted type (write key ``type``) are always the same canonical
-        # spelling. Unknown types pass through flagged, never rejected.
-        raw_type = entity.entity_type
+    def _canonical_entity_type(self, raw_type: str) -> str:
+        """Registry-canonicalize one entity type at the write boundary.
+
+        Issue #99 write-boundary consistency: the resolved/matched type (read
+        key) and the persisted type (write key ``type``) are always the same
+        canonical spelling. Unknown types pass through flagged, never rejected.
+        Shared by the entity and state-event write paths (issue #98/#107).
+        """
         entity_type = (
-            entity.entity_type if self.entity_registry is None
+            raw_type if self.entity_registry is None
             else self.entity_registry.canonical_for(raw_type)
         )
         if self.entity_registry is not None and not self.entity_registry.is_known(raw_type):
@@ -191,6 +194,10 @@ class Neo4jGraphWriter:
                     "add it (or an alias) to the entity registry to consolidate it",
                     entity_type,
                 )
+        return entity_type
+
+    def upsert_entity(self, entity: GraphEntity) -> None:
+        entity_type = self._canonical_entity_type(entity.entity_type)
         query = (
             "MERGE (e:Entity {name: $name, type: $type}) "
             "ON CREATE SET e.created_at = datetime(), e.updated_at = datetime() "
@@ -868,24 +875,31 @@ class Neo4jGraphWriter:
     # --- state ledger (issue #98, ADR-0007 two-layer precedent) -----------
 
     def _canonical_state_key(self, raw_key: str) -> tuple[str, bool]:
-        """Canonicalize one state key; unknown keys pass flagged, never rejected."""
+        """Canonicalize one state key; unknown keys pass flagged, never rejected.
+
+        Warn-once only here: the orchestrator owns the per-run unknown-key
+        accounting (``IngestStats.unknown_state_keys``) so one occurrence is
+        never counted twice (PR #108 P2-2).
+        """
         canonical = self.state_registry.canonical_for(raw_key)
         unknown = not self.state_registry.is_known(raw_key)
-        if unknown:
-            self.unknown_state_counts[canonical] = (
-                self.unknown_state_counts.get(canonical, 0) + 1)
-            if canonical not in self._warned_unknown_state:
-                self._warned_unknown_state.add(canonical)
-                logger.warning(
-                    "unregistered state key %r passed through uncanonicalized; "
-                    "add it (or an alias) to state-registry.yaml to consolidate it",
-                    raw_key)
+        if unknown and canonical not in self._warned_unknown_state:
+            self._warned_unknown_state.add(canonical)
+            logger.warning(
+                "unregistered state key %r passed through uncanonicalized; "
+                "add it (or an alias) to state-registry.yaml to consolidate it",
+                raw_key)
         return canonical, unknown
 
+    # Load ALL of the entity's rows before recomputing the denormalized map:
+    # the map SET is a full replacement, so filtering by state_key here would
+    # wipe every sibling key's entry from ``Entity.state`` (PR #108 P1-1).
+    # The entity match carries ``type`` so it mirrors the write MERGE key.
     _STATE_ROWS_LOAD_QUERY = (
-        "MATCH (e:Entity {name: $entity})-[:HAS_STATE_EVENT]->"
-        "(s:StateEvent {state_key: $state_key}) "
-        "RETURN s.source_ref AS source_ref, s.confidence AS confidence, "
+        "MATCH (e:Entity {name: $entity, type: $entity_type})-[:HAS_STATE_EVENT]->"
+        "(s:StateEvent) "
+        "RETURN s.state_key AS state_key, s.source_ref AS source_ref, "
+        "s.confidence AS confidence, "
         "s.evidence AS evidence, s.scope_conditions AS scope_conditions, "
         "s.value AS value, s.unit AS unit, s.as_of AS as_of, "
         "s.entity_type AS entity_type"
@@ -918,9 +932,13 @@ class Neo4jGraphWriter:
 
     def upsert_state_event(self, state: StateEvent) -> None:
         """Append one state assertion as a ledger row and recompute the entity map."""
+        # Write-boundary consistency (issue #99 precedent): the state row and
+        # the Entity MERGE key use the registry-canonical type, so a candidate
+        # typed with a registry alias cannot fragment the entity (PR #108 P1-2).
+        entity_type = self._canonical_entity_type(state.entity_type)
         state_key, _unknown = self._canonical_state_key(state.state_key)
         candidate = StateEvent(
-            entity=state.entity, entity_type=state.entity_type,
+            entity=state.entity, entity_type=entity_type,
             state_key=state_key, value=state.value, unit=state.unit,
             as_of=state.as_of, confidence=state.confidence,
             evidence=state.evidence, scope_conditions=state.scope_conditions,
@@ -930,7 +948,8 @@ class Neo4jGraphWriter:
             existing = [
                 StateEvent(
                     entity=candidate.entity, entity_type=record["entity_type"] or "",
-                    state_key=state_key, value=record["value"] or "",
+                    state_key=record["state_key"] or state_key,
+                    value=record["value"] or "",
                     unit=record["unit"] or "", as_of=record["as_of"] or "",
                     confidence=record["confidence"] or 0.0,
                     evidence=record["evidence"] or "",
@@ -939,7 +958,7 @@ class Neo4jGraphWriter:
                 )
                 for record in session.run(
                     self._STATE_ROWS_LOAD_QUERY,
-                    entity=candidate.entity, state_key=state_key,
+                    entity=candidate.entity, entity_type=candidate.entity_type,
                 )
             ]
             plan = plan_state_writes(existing, [candidate])

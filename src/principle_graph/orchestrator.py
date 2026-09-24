@@ -403,7 +403,11 @@ class IngestOrchestrator:
         if not callable(upsert_state) or not approved_states:
             return 0
         registry = SessionRegistry()
-        resolver = EntityResolver(self.store, self.embedder, registry)
+        # Issue #107 merge interaction (PR #108 P1-2): state entities resolve
+        # through the same entity-type registry as triple endpoints, so a
+        # candidate typed with a registry alias lands on the canonical entity.
+        resolver = EntityResolver(self.store, self.embedder, registry,
+                                  entity_registry=self.entity_registry)
         committed = 0
         for state in approved_states:
             resolution = self._ensure_create_new(resolver.resolve(

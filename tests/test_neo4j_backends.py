@@ -626,3 +626,86 @@ def test_entity_store_containment_uses_token_list_not_string_param():
     assert "$name" not in query
     assert "coalesce(e.aliases, [])" in query
     assert params == {"type": "person", "tokens": ["merz"]}
+
+
+# --- state ledger write path (issue #98, PR #108 fix round) ------------------
+
+class _StateRow(dict):
+    """Row dict with tolerant .get, mirroring the real driver's Record."""
+    def get(self, key, default=None):
+        return dict.get(self, key, default)
+
+
+def _state_driver(rows):
+    class _Session(RecordingSession):
+        def run(self, query, **params):
+            self.queries.append((query, params))
+            if "HAS_STATE_EVENT" in query and "RETURN" in query:
+                return RecordingResult(rows)
+            return RecordingResult([])
+
+    class _Driver(RecordingDriver):
+        def session(self, database=None):
+            session = _Session(self._rows)
+            self.sessions.append(session)
+            return session
+
+    return _Driver(rows)
+
+
+def _state_event(**overrides):
+    from principle_graph.state import StateEvent
+    values = dict(
+        entity="Friedrich Merz", entity_type="person", state_key="approval_rating",
+        value="42", unit="percent", as_of="2026-09-01", confidence=0.9,
+        evidence="polls", scope_conditions="", source_ref="note-1:chunk-1",
+    )
+    values.update(overrides)
+    return StateEvent(**values)
+
+
+def test_upsert_state_event_loads_all_sibling_rows_before_map_recompute():
+    """P1-1: sibling state keys must survive the denormalized map recompute."""
+    rows = [
+        _StateRow(state_key="approval_rating", entity_type="person",
+                  value="42", unit="percent", as_of="2026-09-01",
+                  confidence=0.9, evidence="polls", scope_conditions="",
+                  source_ref="note-1:chunk-1"),
+        _StateRow(state_key="yield_level", entity_type="person",
+                  value="elevated", unit="", as_of="2026-09-02",
+                  confidence=0.8, evidence="bund", scope_conditions="",
+                  source_ref="note-1:chunk-2"),
+    ]
+    driver = _state_driver(rows)
+    writer = Neo4jGraphWriter(driver)
+
+    writer.upsert_state_event(_state_event(state_key="approval_rating",
+                                           as_of="2026-09-03"))
+
+    (session,) = driver.sessions
+    load = [(q, p) for q, p in session.queries
+            if "HAS_STATE_EVENT" in q and "RETURN" in q]
+    [(load_query, load_params)] = load
+    # Load is unfiltered by state_key: planning sees every sibling row.
+    assert "{state_key" not in load_query
+    assert load_params == {"entity": "Friedrich Merz", "entity_type": "person"}
+    map_set = [(q, p) for q, p in session.queries if "SET e.state" in q]
+    [(query, params)] = map_set
+    entries = json.loads(params["state"])
+    assert set(entries) == {"approval_rating", "yield_level"}
+
+
+def test_upsert_state_event_canonicalizes_entity_type_at_boundary():
+    """P1-2: a registry-alias type never fragments the state entity."""
+    from principle_graph.label_registry import LabelEntry, LabelRegistry
+    registry = LabelRegistry(1, {"person": LabelEntry("person", ("politician",), None, "")})
+    driver = _state_driver([])
+    writer = Neo4jGraphWriter(driver, entity_registry=registry)
+
+    writer.upsert_state_event(_state_event(entity_type="politician"))
+
+    (session,) = driver.sessions
+    merge = [(q, p) for q, p in session.queries if "HAS_STATE_EVENT" in q and "MERGE" in q]
+    [(query, params)] = merge
+    assert params["entity_type"] == "person"
+    assert "{name: $entity, type: $entity_type}" in query

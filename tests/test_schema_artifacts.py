@@ -45,6 +45,22 @@ class SchemaArtifactTests(unittest.TestCase):
             ),
         )
 
+    def test_ddl_defines_state_event_source_ref_index(self):
+        self.assertRegex(
+            DDL,
+            re.compile(
+                r"CREATE RANGE INDEX state_event_source_ref IF NOT EXISTS\s+"
+                r"FOR \(event:StateEvent\)\s+ON \(event\.source_ref\)",
+                re.DOTALL,
+            ),
+        )
+
+    def test_spec_defines_the_state_ledger(self):
+        # Issue #98 schema doc coverage (PR #108 P2-1).
+        self.assertIn("### `StateEvent`", SPEC)
+        self.assertIn("HAS_STATE_EVENT", SPEC)
+        self.assertIn("`state` | map<string, map>", SPEC)
+
     def test_spec_defines_the_source_node_and_from_source_link(self):
         self.assertIn("### `Source`", SPEC)
         self.assertIn("FROM_SOURCE", SPEC)
