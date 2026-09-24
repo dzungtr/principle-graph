@@ -30,7 +30,7 @@ Transport = Callable[[str, Mapping[str, str], bytes, float], bytes]
 class OpenAICompatibleMessagesClient:
     """Adapt OpenAI chat completions to the Anthropic-shaped MessagesClient protocol."""
 
-    def __init__(self, base_url: str, *, model: str = "z-ai/glm-5.2", api_key: str = "local-placeholder", timeout: float = 60, transport: Transport | None = None) -> None:
+    def __init__(self, base_url: str, *, model: str = "z-ai/glm-5.3-flash", api_key: str = "local-placeholder", timeout: float = 60, transport: Transport | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key or "local-placeholder"

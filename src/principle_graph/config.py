@@ -24,7 +24,7 @@ class Settings:
     password: str = "principlegraph"
     database: str = "neo4j"
     llm_base_url: str = "http://localhost:8000"
-    llm_model: str = "z-ai/glm-5.2"
+    llm_model: str = "z-ai/glm-5.3-flash"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "bge-m3"
     # Mirrors fanout.QUERY_SEED_SIMILARITY; pinned equal by test.
@@ -46,8 +46,8 @@ class Settings:
             user=os.getenv("NEO4J_USER", cls.user),
             password=os.getenv("NEO4J_PASSWORD", cls.password),
             database=os.getenv("NEO4J_DATABASE", cls.database),
-            llm_base_url=os.getenv("APERTURE_BASE_URL", cls.llm_base_url),
-            llm_model=os.getenv("LLM_MODEL", os.getenv("APERTURE_MODEL", cls.llm_model)),
+            llm_base_url=os.getenv("MODEL_GATEWAY_URL", os.getenv("APERTURE_BASE_URL", cls.llm_base_url)),
+            llm_model=os.getenv("LLM_MODEL", os.getenv("MODEL_GATEWAY_MODEL", cls.llm_model)),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", cls.ollama_base_url),
             ollama_model=os.getenv("OLLAMA_MODEL", cls.ollama_model),
             query_seed_similarity=_env_float("PG_QUERY_SEED_SIMILARITY", cls.query_seed_similarity),

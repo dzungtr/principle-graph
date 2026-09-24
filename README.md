@@ -179,8 +179,8 @@ variables (all optional; defaults shown):
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `APERTURE_BASE_URL` | `http://localhost:8000` | OpenAI-compatible extraction gateway |
-| `LLM_MODEL` / `APERTURE_MODEL` | `z-ai/glm-5.2` | Extraction model id |
+| `MODEL_GATEWAY_URL` | `http://localhost:8000` | OpenAI-compatible extraction gateway |
+| `LLM_MODEL` / `MODEL_GATEWAY_MODEL` | `z-ai/glm-5.3-flash` | Extraction model id |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Local bge-m3 embeddings service |
 | `OLLAMA_MODEL` | `bge-m3` | Embedding model id |
 | `PG_REJECTED_LOG_PATH` | `.pg/rejected.jsonl` | Where rejected review records are appended |
