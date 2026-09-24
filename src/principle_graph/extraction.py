@@ -61,10 +61,28 @@ Extract only relationships explicitly asserted or reasonably implied by that chu
 Do not use general or outside knowledge. If a field cannot be grounded in the chunk,
 omit the candidate. Preserve qualifiers in scope_conditions. Return zero or more
 propose_triple or propose_state tool calls and no prose claims outside tool calls.
+Shape every entity as follows:
+- Atomicity: subject and object each name exactly one thing (a person, organization,
+country, place, event, policy, agreement, product, technology, market, or concept).
+Never use a clause, sentence, list, or possessive description as an entity; move such
+content into the relation, scope_conditions, or evidence instead.
+- Canonical naming: use the canonical form — name people by their full name ("Friedrich Merz", never "Merz"
+or "Germany's chancellor") and organizations by one standard short name ("Bank of
+Japan", never "BOJ" and "Bank of Japan" in the same run).
+- Decomposition: a proposition about several actors becomes one separate propose_triple per
+actor, all sharing the same evidence sentence from the chunk. Never collapse a multi-actor
+claim into a compound entity such as "France and Canada".
+- Event-nodes are second-class: if a subject-verb-object sentence carries the whole
+claim, emit it as the edge itself. Create an event entity only for events discussed
+as things ("EU-Canada summit", "November 10 truce expiry").
+- Names stay bare: move parenthetical qualifiers ("the ECB (European Central Bank)",
+"rates (2024)") into scope_conditions or evidence and keep the name itself clean.
 Use propose_state for numeric or qualitative measurements of an entity (approval
-ratings, rates, volumes, levels such as "elevated"): the entity carries the state,
-the measurement never becomes its own node. Use the chunk's source_ref verbatim.
-Confidence is for this extraction event only; ambiguity lowers it.
+ratings, rates, volumes, levels such as "elevated"): quantities and measurements
+route to propose_state, the entity carries the state, and the measurement never
+becomes its own node or endpoint. Use the chunk's source_ref verbatim.
+There is no cap on how many candidates you may propose for a chunk; propose every
+grounded candidate. Confidence is for this extraction event only; ambiguity lowers it.
 Include domain only when the chunk itself grounds the claim in a topic area —
 never guess; omit the field to leave the row untagged."""
 
