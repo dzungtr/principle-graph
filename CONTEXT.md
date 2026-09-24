@@ -11,8 +11,8 @@ A Markdown or PDF knowledge document consumed into the graph by one ingestion ru
 _Avoid_: Book, corpus, feed
 
 **Ingest**:
-The one-shot act of consuming a source end-to-end: chunk → extract → resolve → reduce → review → commit.
-_Avoid_: Digest, import, learn
+The two-phase act of consuming a source end-to-end: scan and consolidate (verb menu + entity roster), then chunk → extract → resolve → reduce → review → commit.
+_Avoid_: Digest, import, learn, one-shot run
 
 **Chunk**:
 A section-scoped slice of a source, processed sequentially so later chunks can link back to earlier ones.
@@ -42,12 +42,32 @@ The relation verb exactly as the extractor proposed it, preserved on the ledger 
 _Avoid_: Original edge, dirty verb
 
 **Label registry**:
-A versioned data file mapping canonical labels to aliases, inverse pairs, and descriptions. One generic loader serves relations and domains; unknown labels pass through flagged, never rejected.
-_Avoid_: Enum, allowlist, code constant
+A versioned data file mapping canonical labels to aliases, inverse pairs, and descriptions. One generic loader serves relations, domains, entity types, and state keys; unknown labels pass through flagged, never rejected. Registries hold the system's language only — never entity knowledge.
+_Avoid_: Enum, allowlist, code constant, alias file for entities
 
 **Confidence**:
 Accumulated support for a relationship, aggregated across independent extraction events. Not a truth score.
 _Avoid_: Score, probability
+
+**State assertion**:
+A numeric or qualitative measurement of exactly one entity, carried with full provenance. Stored as an append-only StateEvent ledger row plus a denormalized current state on the entity.
+_Avoid_: Quantity node, attribute, fact
+
+**Scan pass**:
+The lightweight pre-extraction inventory of a source: candidate verbs and entity mentions, consolidated against registries and the live graph before any claim is extracted.
+_Avoid_: Pre-pass, survey, digest
+
+**Verb menu**:
+The per-source consolidated relation vocabulary injected into extraction prompts.
+_Avoid_: Verb list, vocabulary prompt
+
+**Entity roster**:
+The per-source canonical entity names and alias hints injected into extraction prompts.
+_Avoid_: Entity list, seed list
+
+**Mis-shape dispatch**:
+The protocol where deterministic guards classify a mis-shaped proposal and a decision model picks the repair step from a per-category menu, which the pipeline then executes.
+_Avoid_: Auto-fix, rejection, cleanup, sanitization
 
 **Domain tag**:
 An optional registry-normalized label on an extraction event naming the belief domain it belongs to (e.g. economics). Absent means explicitly untagged.
