@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 import math
 import re
 
@@ -41,6 +41,9 @@ class Direction:
 class QueryGraph(Protocol):
     def entities(self) -> Sequence[Entity]: ...
     def edges_for(self, entity: Entity) -> Sequence[GraphEdge]: ...
+    # State seam (issue #98): current states for one entity, when the backend
+    # tracks them. Optional — renderers degrade silently when absent.
+    def states_for(self, entity: Entity) -> Sequence[Any]: ...
 
 
 class QueryEmbedder(Protocol):
@@ -106,7 +109,20 @@ def query_directions(query: str, graph: QueryGraph, *, top_k: int = 5,
                    for i, d in enumerate(ranked, 1)]
 
 
-def render_markdown(query: str, seeds: Sequence[Seed], directions: Sequence[Direction]) -> str:
+def seed_states(seeds: Sequence[Seed], graph: Any) -> dict[str, list]:
+    """Collect current states for each seed via the graph's state seam (issue #98).
+
+    Backends without ``states_for`` yield an empty mapping — directions render
+    unchanged, so the fan-out output shape only grows when states exist.
+    """
+    loader = getattr(graph, "states_for", None)
+    if not callable(loader):
+        return {}
+    return {seed.entity.name: list(loader(seed.entity)) for seed in seeds}
+
+
+def render_markdown(query: str, seeds: Sequence[Seed], directions: Sequence[Direction],
+                    states: Mapping[str, Sequence[Any]] | None = None) -> str:
     if not seeds:
         return f"No matching seeds for: {query}"
     lines = [f"Fan-out directions for: {query}", ""]
@@ -117,4 +133,13 @@ def render_markdown(query: str, seeds: Sequence[Seed], directions: Sequence[Dire
                      f"(confidence {d.confidence:.2f}; scope: {scope}; source: {source})")
     if not directions:
         lines.append("No committed directions found.")
+    for seed_name, seed_states in (states or {}).items():
+        if not seed_states:
+            continue
+        rendered = "; ".join(
+            f"{s.state_key}={s.value}"
+            + (f" {s.unit}" if getattr(s, "unit", "") else "")
+            + f" (as_of {s.as_of}; confidence {s.confidence:.2f})"
+            for s in seed_states)
+        lines.append(f"States — **{seed_name}**: {rendered}")
     return "\n".join(lines)

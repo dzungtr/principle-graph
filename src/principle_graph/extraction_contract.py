@@ -40,6 +40,47 @@ def validate_triple(candidate: dict[str, Any]) -> dict[str, Any]:
     return candidate
 
 
+_REQUIRED_STATE = (
+    "entity", "entity_type", "state_key", "value", "unit", "as_of",
+    "confidence", "evidence", "scope_conditions", "source_ref",
+)
+
+
+def validate_state(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Validate a ``propose_state`` candidate and normalize its value to a string.
+
+    Same provenance discipline as :func:`validate_triple` (issue #98): non-empty
+    strings for the claim text, snake_case labels, bounded confidence, and the
+    chunk's exact ``source_ref``. ``value`` may be numeric or qualitative
+    (``elevated``) — both normalize to a string; ``state_key`` canonicalization
+    against the state registry happens at the write boundary, not here.
+    """
+    missing = [key for key in _REQUIRED_STATE if key not in candidate]
+    if missing:
+        raise ContractError(f"missing fields: {', '.join(missing)}")
+    for key in ("entity", "evidence", "source_ref", "as_of"):
+        if not isinstance(candidate[key], str) or not candidate[key].strip():
+            raise ContractError(f"{key} must be a non-empty string")
+    for key in ("scope_conditions",):
+        if not isinstance(candidate[key], str):
+            raise ContractError(f"{key} must be a string (empty when unconditional)")
+    for key in ("entity_type", "state_key"):
+        if not isinstance(candidate[key], str) or not _LABEL.fullmatch(candidate[key]):
+            raise ContractError(f"{key} must be lowercase snake_case")
+    confidence = candidate["confidence"]
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+        raise ContractError("confidence must be a number in [0, 1]")
+    value = candidate["value"]
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)) \
+            or not str(value).strip() or (isinstance(value, str) and not value.strip()):
+        raise ContractError("value must be a non-empty string or number")
+    candidate["value"] = str(value).strip()
+    unit = candidate["unit"]
+    if not isinstance(unit, str):
+        raise ContractError("unit must be a string (empty for qualitative values)")
+    return candidate
+
+
 @dataclass(frozen=True)
 class Chunk:
     id: str

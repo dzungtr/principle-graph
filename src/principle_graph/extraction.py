@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, Sequence
 
-from .extraction_contract import Chunk, ContractError, validate_triple
+from .extraction_contract import Chunk, ContractError, validate_state, validate_triple
 
 PROPOSE_TRIPLE_TOOL: dict[str, Any] = {
     "name": "propose_triple",
@@ -31,12 +31,40 @@ PROPOSE_TRIPLE_TOOL: dict[str, Any] = {
     },
 }
 
-SYSTEM_PROMPT = """You extract relationship candidates from exactly one supplied source chunk.
+PROPOSE_STATE_TOOL: dict[str, Any] = {
+    "name": "propose_state",
+    "description": "Propose one numeric or qualitative measurement of an entity that is explicitly asserted or reasonably implied by the supplied chunk.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "entity": {"type": "string"},
+            "entity_type": {"type": "string"},
+            "state_key": {"type": "string"},
+            "value": {"type": ["string", "number"]},
+            "unit": {"type": "string"},
+            "as_of": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "evidence": {"type": "string"},
+            "scope_conditions": {"type": "string"},
+            "source_ref": {"type": "string"},
+        },
+        "required": [
+            "entity", "entity_type", "state_key", "value", "unit", "as_of",
+            "confidence", "evidence", "scope_conditions", "source_ref",
+        ],
+        "additionalProperties": False,
+    },
+}
+
+SYSTEM_PROMPT = """You extract relationship candidates and entity measurements from exactly one supplied source chunk.
 Extract only relationships explicitly asserted or reasonably implied by that chunk.
 Do not use general or outside knowledge. If a field cannot be grounded in the chunk,
 omit the candidate. Preserve qualifiers in scope_conditions. Return zero or more
-propose_triple tool calls and no prose claims outside tool calls. Use the chunk's
-source_ref verbatim. Confidence is for this extraction event only; ambiguity lowers it.
+propose_triple or propose_state tool calls and no prose claims outside tool calls.
+Use propose_state for numeric or qualitative measurements of an entity (approval
+ratings, rates, volumes, levels such as "elevated"): the entity carries the state,
+the measurement never becomes its own node. Use the chunk's source_ref verbatim.
+Confidence is for this extraction event only; ambiguity lowers it.
 Include domain only when the chunk itself grounds the claim in a topic area —
 never guess; omit the field to leave the row untagged."""
 
@@ -50,6 +78,9 @@ class ExtractionRun:
     """Disposable scratch state produced by one sequential extraction run."""
 
     candidates: list[dict[str, Any]] = field(default_factory=list)
+    # Validated ``propose_state`` candidates (issue #98): same provenance
+    # discipline as triples; stored separately so the triple pipeline is untouched.
+    state_candidates: list[dict[str, Any]] = field(default_factory=list)
     rejected: list[dict[str, Any]] = field(default_factory=list)
     completed_chunks: list[str] = field(default_factory=list)
 
@@ -69,12 +100,24 @@ class SequentialExtractor:
                 model=self.model,
                 system=self.system,
                 max_tokens=4096,
-                tools=[PROPOSE_TRIPLE_TOOL],
+                tools=[PROPOSE_TRIPLE_TOOL, PROPOSE_STATE_TOOL],
                 tool_choice={"type": "auto"},
                 messages=[{"role": "user", "content": self._chunk_prompt(chunk)}],
             )
             for block in self._tool_blocks(response):
-                if getattr(block, "name", None) != "propose_triple":
+                name = getattr(block, "name", None)
+                if name == "propose_state":
+                    try:
+                        candidate = self._input(block)
+                        validate_state(candidate)
+                        if candidate["source_ref"] != chunk.source_ref:
+                            raise ContractError("source_ref must match the supplied chunk")
+                    except (ContractError, TypeError, ValueError) as error:
+                        scratch.rejected.append({"chunk_id": chunk.id, "candidate": locals().get("candidate", {}), "reason": str(error), "tool": "propose_state"})
+                    else:
+                        scratch.state_candidates.append(candidate)
+                    continue
+                if name != "propose_triple":
                     continue
                 try:
                     candidate = self._input(block)

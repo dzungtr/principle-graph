@@ -15,6 +15,7 @@ runnable DDL ships as package data at
 | `type` | string | yes | Domain/entity type, canonicalized against `entity-registry.yaml` before matching and at the entity write boundary (issue #99); unknown types pass through flagged. Not a Neo4j enum. |
 | `embedding` | list<float> | no | Local Ollama `bge-m3` embedding, 1024 dimensions (ADR-0001). |
 | `aliases` | list<string> | no | Merged surface forms accumulated on the canonical entity (issue #99); appended by resolution when a variant merges, never removed. |
+| `state` | map<string, map> | no | Denormalized current-state map (issue #98): keyed by canonical state key, each entry carrying `value`, `unit`, `as_of`, `confidence`, `source_ref`. Recomputed from the entity's full `:StateEvent` row set on every state write (latest `as_of` wins, then confidence); the ledger rows are the source of truth. Read by fan-out `states_for`.
 | `created_at` | datetime | yes | First persistence time. |
 | `updated_at` | datetime | yes | Last mutation time. |
 
@@ -44,6 +45,30 @@ no-op under the default keep-first mode.
 | `domain` | string | no | Optional domain tag, canonicalized against `domain-registry.yaml` at the write boundary (aliases collapse, unknowns pass through flagged); untagged when absent (slice #78). |
 | `created_at` | datetime | yes | First persistence time. |
 | `updated_at` | datetime | yes | Last touch time (keep-first never rewrites values). |
+
+### `StateEvent`
+
+State ledger row (issue #98, ADR-0007 two-layer precedent): one append-only
+state assertion per `(entity, state_key, source_ref)` identity, wired
+`(:Entity)-[:HAS_STATE_EVENT]->(:StateEvent)` with keep-first enforced by the
+write layer's pattern MERGE (same Community 5.x constraint as the extraction
+ledger). The entity is matched on its canonical `(name, type)` identity and
+the `entity_type` is registry-canonicalized at the write boundary (issue #99),
+so alias-typed state candidates never fragment the entity.
+
+| Property | Type | Required | Meaning |
+|---|---|---:|---|
+| `state_key` | string | yes | Canonical state key per `state-registry.yaml` (aliases collapse, unknown keys pass through flagged, never rejected). Part of row identity. |
+| `source_ref` | string | yes | Source/chunk reference; part of row identity. |
+| `entity_type` | string | yes | Registry-canonical entity type of the owning entity. |
+| `value` | string | yes | Asserted value, normalized to string (numeric or qualitative). |
+| `unit` | string | no | Unit for numeric values (`percent`, …). |
+| `as_of` | string | yes | Point-in-time the assertion holds. Current-state resolution orders on this, then confidence. |
+| `confidence` | float | yes | Extraction confidence in `[0.0, 1.0]`. |
+| `evidence` | string | yes | Supporting snippet. |
+| `scope_conditions` | string | no | Qualifiers claimed by the extraction. |
+| `unknown_key` | boolean | no | True when `state_key` was not in the registry (never-reject stance, PRD #95). |
+| `created_at` / `updated_at` | datetime | yes | First persistence / last touch (keep-first never rewrites values). |
 
 ### `Source`
 
@@ -84,6 +109,10 @@ denormalized `source_ref` string — ledger identity depends on it (ADR-0002).
 `pg provenance <source-id>` walks everything one source claimed, including rows
 later contradicted.
 
+`(:Entity)-[:HAS_STATE_EVENT]->(:StateEvent)` (issue #98) wires each state
+ledger row to the entity it asserts about; rows also link to their source via
+`(:StateEvent)-[:FROM_SOURCE]->(:Source)` when a `source_ref` is present.
+
 ## Relationships (Arrows)
 
 Every typed, directed relationship uses its domain relation as the Neo4j relationship type
@@ -121,7 +150,8 @@ backfill migration removes them.
 - a 1024-dimensional cosine vector index on `Entity.embedding`, matching the local `bge-m3` embedding model (ADR-0001);
 - a range index on `ExtractionEvent(source_ref)` for provenance lookups (ADR-0002);
 - a range index on `Source(id)` for provenance walks (ADR-0004);
-- a range index on `Verdict(id)` for append-only fact-check receipts (ADR-0005).
+- a range index on `Verdict(id)` for append-only fact-check receipts (ADR-0005);
+- a range index on `StateEvent(source_ref)` for per-source state provenance walks (issue #98).
 
 Neo4j property types are enforced by the application write layer (including confidence bounds,
 non-null required fields, and timestamp assignment). Neo4j does not support a property schema

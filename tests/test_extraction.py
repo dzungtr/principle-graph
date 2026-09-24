@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from principle_graph.extraction import PROPOSE_TRIPLE_TOOL, SequentialExtractor
+from principle_graph.extraction import PROPOSE_STATE_TOOL, PROPOSE_TRIPLE_TOOL, SequentialExtractor
 from principle_graph.extraction_contract import chunk_markdown
 
 
@@ -48,7 +48,7 @@ def test_extracts_chunks_sequentially_and_stages_valid_candidates():
         "Extract from this chunk.\n\nsource_ref: book:chunk-1\nchunk_id: chunk-1\nsection_path: One\n\nchunk text:\n# One\nrates reduce borrowing.",
         "Extract from this chunk.\n\nsource_ref: book:chunk-2\nchunk_id: chunk-2\nsection_path: Two\n\nchunk text:\n# Two\ninflation follows.",
     ]
-    assert client.calls[0]["tools"] == [PROPOSE_TRIPLE_TOOL]
+    assert client.calls[0]["tools"] == [PROPOSE_TRIPLE_TOOL, PROPOSE_STATE_TOOL]
 
 
 def test_rejects_malformed_and_wrong_source_tool_calls():

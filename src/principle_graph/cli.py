@@ -14,7 +14,7 @@ from typing import Callable
 from .config import Settings
 from .extraction import SequentialExtractor
 from .factcheck import fact_check_notice, fact_check_rows
-from .fanout import query_directions, render_markdown
+from .fanout import query_directions, render_markdown, seed_states
 from .label_registry import default_entity_registry_path, load_label_registry
 from .ledger import resolve_repeat_mode
 from .llm_gateway import OpenAICompatibleMessagesClient
@@ -87,6 +87,10 @@ class _Neo4jQueryGraph:
         writer = Neo4jGraphWriter(self.driver, self.database)
         return writer.edges_for_entity(entity.name)
 
+    def states_for(self, entity):
+        writer = Neo4jGraphWriter(self.driver, self.database)
+        return writer.states_for(entity.name)
+
 
 def query_command(settings: Settings, text: str, top_k: int, max_edges: int, output_format: str) -> int:
     graph = _Neo4jQueryGraph(settings)
@@ -97,18 +101,26 @@ def query_command(settings: Settings, text: str, top_k: int, max_edges: int, out
                                              embedder=_build_embedder(settings),
                                              threshold=settings.query_seed_similarity,
                                              notices=notices)
+        states = seed_states(seeds, graph)
         for notice in notices:
             # stderr keeps the JSON output shape (query/seeds/directions) unchanged.
             print(f"Notice: {notice}", file=sys.stderr)
         if output_format == "json":
             print(json.dumps({"query": text,
                               "seeds": [{"name": s.entity.name, "score": s.score} for s in seeds],
+                              # Seed entity states alongside directions (issue #98).
+                              "states": {name: [{"state_key": st.state_key, "value": st.value,
+                                                 "unit": st.unit, "as_of": st.as_of,
+                                                 "confidence": st.confidence,
+                                                 "source_ref": st.source_ref}
+                                                for st in seed_states_list]
+                                         for name, seed_states_list in states.items()},
                               "directions": [{"rank": d.rank, "seed": d.seed, "relation": d.relation,
                                               "neighbor": d.neighbor, "confidence": d.confidence,
                                               "scope_conditions": d.scope_conditions, "source_ref": d.source_ref,
                                               "evidence": list(d.evidence)} for d in directions]}))
         else:
-            print(render_markdown(text, seeds, directions))
+            print(render_markdown(text, seeds, directions, states=states))
     except Exception as error:
         print(f"Neo4j query failed: {error}")
         return 1
