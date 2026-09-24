@@ -21,6 +21,7 @@ from .extraction_contract import Chunk, chunk_markdown, chunk_pdf
 from .novelty import NoveltyFilter, apply_novelty_filter
 from .reduction import GraphEdge, GraphEntity, GraphWriter, InMemoryGraph, assemble_delta, commit_delta
 from .resolution import AmbiguityItem, EntityResolver, Resolution, SessionRegistry
+from .label_registry import LabelRegistry
 from .review import GraphDelta, ReviewResult, review_and_commit
 
 
@@ -66,6 +67,9 @@ class IngestStats:
     # Slice #78: unknown domains passed through at the write boundary, per-domain
     # occurrence counts; empty when all domains canonicalized or untracked.
     unknown_domains: tuple[tuple[str, int], ...] = ()
+    # Issue #99: unknown entity types passed through at the write boundary,
+    # per-type occurrence counts; empty when all types canonicalized/untracked.
+    unknown_entity_types: tuple[tuple[str, int], ...] = ()
     # ADR-0006 novelty gate aggregates; zeroed when the filter is opted out.
     novelty_calls: int = 0
     filtered_noise: int = 0
@@ -102,6 +106,11 @@ class IngestStats:
                 f"{name}={count}" for name, count in self.unknown_domains)
             committed_lines.append(
                 f"unknown domains passed through uncanonicalized: {unknown_domains}")
+        if self.unknown_entity_types:
+            unknown_types = ", ".join(
+                f"{name}={count}" for name, count in self.unknown_entity_types)
+            committed_lines.append(
+                f"unknown entity types passed through uncanonicalized: {unknown_types}")
         if self.novelty_calls or self.filtered_noise or self.filtered_common_sense:
             committed_lines.append(
                 f"filtered items: {self.filtered_noise + self.filtered_common_sense} "
@@ -149,6 +158,7 @@ class IngestOrchestrator:
         edge_loader: ExistingEdgeLoader | None = None,
         rejected_log_path: str = ".pg/rejected.jsonl",
         novelty_filter: "NoveltyFilter | None" = None,
+        entity_registry: "LabelRegistry | None" = None,
     ) -> None:
         self.extractor = extractor
         self.store = store
@@ -157,6 +167,8 @@ class IngestOrchestrator:
         self.edge_loader = edge_loader
         self.rejected_log_path = rejected_log_path
         self.novelty_filter = novelty_filter
+        # Issue #99: entity-type registry applied before matching.
+        self.entity_registry = entity_registry
 
     def run(
         self,
@@ -212,6 +224,9 @@ class IngestOrchestrator:
             unknown_domains=tuple(
                 sorted(getattr(self.writer, "unknown_domain_counts", {}).items())
             ),
+            unknown_entity_types=tuple(
+                sorted(getattr(self.writer, "unknown_entity_type_counts", {}).items())
+            ),
             novelty_calls=(novelty.novelty_calls if novelty else 0),
             filtered_noise=(novelty.filtered_noise if novelty else 0),
             filtered_common_sense=(novelty.filtered_common_sense if novelty else 0),
@@ -241,7 +256,8 @@ class IngestOrchestrator:
         v1 spec amendment. The ambiguity item is preserved for stats/review notes.
         """
         registry = SessionRegistry()
-        resolver = EntityResolver(self.store, self.embedder, registry)
+        resolver = EntityResolver(self.store, self.embedder, registry,
+                                  entity_registry=self.entity_registry)
         pairs: list[tuple[dict[str, Any], Any]] = []
         for candidate in run.candidates:
             subject = resolver.resolve(candidate["subject"], candidate["subject_type"],
@@ -274,16 +290,30 @@ class IngestOrchestrator:
             o_name = o_resolution.canonical.name
             s_type = s_resolution.canonical.type
             o_type = o_resolution.canonical.type
-            entity_map[s_name] = GraphEntity(s_name, s_type,
-                                              embedding=tuple(s_resolution.canonical.embedding) if s_resolution.canonical.embedding else None)
-            entity_map[o_name] = GraphEntity(o_name, o_type,
-                                              embedding=tuple(o_resolution.canonical.embedding) if o_resolution.canonical.embedding else None)
+            # Union into any existing entry: a later candidate resolving to the same
+            # canonical (or a candidate's own object slot) must not wipe aliases
+            # accumulated by an earlier same-run merge (AC-1, order-independence).
+            entity_map[s_name] = self._merge_entity_entry(
+                entity_map.get(s_name), s_resolution)
+            entity_map[o_name] = self._merge_entity_entry(
+                entity_map.get(o_name), o_resolution)
             edges.append(GraphEdge(
                 s_name, candidate["relation"].upper(), o_name,
                 candidate["confidence"], candidate["source_ref"],
                 (candidate["evidence"],), candidate["scope_conditions"],
                 candidate.get("domain", "")))
         return assemble_delta(edges, existing=existing, entities=list(entity_map.values()))
+
+    @staticmethod
+    def _merge_entity_entry(prev: GraphEntity | None, resolution) -> GraphEntity:
+        canonical = resolution.canonical
+        aliases = tuple(dict.fromkeys(
+            (prev.aliases if prev else ())
+            + tuple(canonical.aliases)
+            + resolution.new_aliases))
+        embedding = tuple(canonical.embedding) if canonical.embedding else None
+        return GraphEntity(canonical.name, canonical.type,
+                           embedding=embedding, aliases=aliases)
 
     @staticmethod
     def _ensure_create_new(resolution) -> Any:
