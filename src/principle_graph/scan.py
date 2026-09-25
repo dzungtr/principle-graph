@@ -25,7 +25,13 @@ from typing import Any, Protocol, Sequence
 import yaml
 
 from .extraction_contract import Chunk
-from .label_registry import LabelRegistry, default_registry_path, load_label_registry
+from .label_registry import (
+    LabelRegistry,
+    default_registry_path,
+    ensure_working_registry,
+    load_label_registry,
+    resolve_relation_registry_path,
+)
 
 SCAN_TOOL: dict[str, Any] = {
     "name": "scan_candidates",
@@ -210,7 +216,7 @@ def scan_source(
 ) -> ScanResult:
     """Scan one source: batched inventory → deterministic anchoring → one clustering call."""
     if relation_registry is None:
-        relation_registry = load_label_registry(default_registry_path())
+        relation_registry = load_label_registry(resolve_relation_registry_path())
     raw_verbs: list[str] = []
     raw_entities: list[dict[str, str]] = []
     scan_calls = 0
@@ -269,7 +275,11 @@ def scan_source(
                 tuple(str(a) for a in entry.get("aliases", ()) or ()),
             ))
     if staged:
-        path = registry_path if registry_path is not None else default_registry_path()
+        # Staging writes go to the working registry under .pg/ (issue #96):
+        # seeded from the packaged file on first use, so ingestion never
+        # dirties a git-tracked packaged file. Deliberate promotion back into
+        # the packaged registry is the human review gate (pg promote-verbs).
+        path = registry_path if registry_path is not None else ensure_working_registry()
         append_proposed_verbs(path, staged)
 
     return ScanResult(

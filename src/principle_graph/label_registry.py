@@ -117,6 +117,43 @@ def default_registry_path() -> Path:
     return Path(__file__).parent / "data" / "relation-registry.yaml"
 
 
+def default_working_registry_path() -> Path:
+    """The working relation registry (staging write target, issue #96).
+
+    Lives under ``.pg/`` (the established scratch area) so scan-discovered
+    verb staging never dirties a git-tracked packaged file. Seeded from the
+    packaged registry on first use via :func:`ensure_working_registry`.
+    """
+    return Path(".pg/relation-registry.yaml")
+
+
+def ensure_working_registry(
+    packaged_path: str | Path | None = None,
+    working_path: str | Path | None = None,
+) -> Path:
+    """Seed the working relation registry from the packaged one when absent.
+
+    Idempotent: an existing working file is never overwritten. Returns the
+    working path either way.
+    """
+    packaged = Path(packaged_path) if packaged_path is not None else default_registry_path()
+    working = Path(working_path) if working_path is not None else default_working_registry_path()
+    if not working.exists():
+        working.parent.mkdir(parents=True, exist_ok=True)
+        working.write_text(packaged.read_text(encoding="utf-8"), encoding="utf-8")
+    return working
+
+
+def resolve_relation_registry_path() -> Path:
+    """Working registry when it exists, packaged registry otherwise.
+
+    Canonicalization vocabulary is the union: the packaged baseline is always
+    in force, and a seeded working file extends it with staged verbs.
+    """
+    working = default_working_registry_path()
+    return working if working.exists() else default_registry_path()
+
+
 def default_domain_registry_path() -> Path:
     """The packaged domain registry (PRD #76 slice #78); same loader contract."""
     return Path(__file__).parent / "data" / "domain-registry.yaml"
@@ -275,5 +312,8 @@ __all__ = [
     "default_entity_registry_path",
     "default_registry_path",
     "default_state_registry_path",
+    "default_working_registry_path",
+    "ensure_working_registry",
+    "resolve_relation_registry_path",
     "load_label_registry",
 ]

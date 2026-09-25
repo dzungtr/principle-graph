@@ -18,7 +18,9 @@ from .fanout import query_directions, render_markdown, seed_states
 from .label_registry import (
     default_entity_registry_path,
     default_registry_path,
+    ensure_working_registry,
     load_label_registry,
+    resolve_relation_registry_path,
 )
 from .ledger import resolve_repeat_mode
 from .llm_gateway import OpenAICompatibleMessagesClient
@@ -251,14 +253,17 @@ def build_orchestrator(settings: Settings, repeat_mode: str | None = None,
     extractor = SequentialExtractor(client=messages, model=settings.llm_model)
     # Issue #102 two-pass scan: one scanner over the same LLM seam, the
     # relation registry (its staging section is the auto-append target), the
-    # entity-type registry, and the live-graph store seam.
+    # entity-type registry, and the live-graph store seam. The staging write
+    # target is the working registry under .pg/ — seeded from the packaged
+    # file, so ingestion never dirties a git-tracked file (issue #96).
+    working_registry = ensure_working_registry()
     scanner = SourceScanner(
         client=messages,
-        relation_registry=load_label_registry(default_registry_path()),
+        relation_registry=load_label_registry(working_registry),
         store=store,
         embedder=embedder,
         entity_registry=entity_registry,
-        registry_path=default_registry_path(),
+        registry_path=working_registry,
         model=settings.llm_model,
     )
     orchestrator = IngestOrchestrator(
@@ -591,6 +596,50 @@ def backfill_evidence_command(settings: Settings, out=sys.stdout) -> int:
     return 0
 
 
+def promote_verbs_command(settings: Settings, apply: bool, out=sys.stdout) -> int:
+    """Fold staged verbs from the working registry into the packaged registry.
+
+    Dry-run by default: prints the promotion without touching the packaged
+    file. ``--apply`` merges the ``proposed:`` labels into the packaged
+    ``labels:`` section and clears the staging block — the deliberate human
+    review gate that replaces per-ingest diffs (issue #96).
+    """
+    import yaml
+
+    packaged_path = default_registry_path()
+    working_path = ensure_working_registry()
+    packaged_text = packaged_path.read_text(encoding="utf-8")
+    packaged_doc = yaml.safe_load(packaged_text)
+    working_doc = yaml.safe_load(working_path.read_text(encoding="utf-8"))
+    staged = (working_doc.get("proposed") or {}).get("labels") or {}
+    canonical = set(packaged_doc.get("labels", {}))
+    fresh = {name: spec for name, spec in staged.items() if name not in canonical}
+    if not fresh:
+        print("No staged verbs to promote.", file=out)
+        return 0
+    if not apply:
+        print(f"Would promote {len(fresh)} staged verb(s) to {packaged_path}:", file=out)
+        for name in sorted(fresh):
+            print(f"  {name}", file=out)
+        print("Re-run with --apply to write.", file=out)
+        return 0
+    # Promote each staged label as a canonical label; drop the staging block.
+    block = ""
+    for name, spec in sorted(fresh.items()):
+        description = str(
+            (spec or {}).get("description", "promoted from working registry")
+        ).replace("\n", " ")
+        block += f"  {name}:\n    description: {description}\n"
+    # Append to the end of the file: labels: entries are top-level keys, and
+    # the packaged registry's trailing sections tolerate appended labels.
+    text = packaged_text.rstrip("\n") + "\n" + block
+    packaged_path.write_text(text, encoding="utf-8")
+    working_doc["proposed"] = {"labels": {}}
+    working_path.write_text(yaml.safe_dump(working_doc, sort_keys=False), encoding="utf-8")
+    print(f"Promoted {len(fresh)} verb(s) to {packaged_path}; staging cleared.", file=out)
+    return 0
+
+
 def normalize_relations_command(settings: Settings, out=sys.stdout) -> int:
     """Run the one-off relation normalization pass and print its report."""
     try:
@@ -817,6 +866,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     normalize.set_defaults(
         handler=lambda: normalize_relations_command(Settings.from_env())
+    )
+    promote = subparsers.add_parser(
+        "promote-verbs",
+        help="fold staged verbs from the working registry into the packaged registry",
+        description=(
+            "Deliberate promotion gate (issue #96): the working registry at "
+            ".pg/relation-registry.yaml accumulates scan-staged verbs during "
+            "ingestion; this command reviews and merges them into the "
+            "git-tracked packaged registry. Dry-run by default; pass --apply "
+            "to write."
+        ),
+    )
+    promote.add_argument(
+        "--apply", action="store_true",
+        help="write the promotion into the packaged registry (default: dry-run)",
+    )
+    promote.set_defaults(
+        handler=lambda a: promote_verbs_command(Settings.from_env(), apply=a.apply)
     )
     factcheck = subparsers.add_parser(
         "fact-check",
