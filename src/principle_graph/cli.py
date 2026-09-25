@@ -242,6 +242,7 @@ def build_orchestrator(settings: Settings, repeat_mode: str | None = None,
     # Entity-type registry (issues #96/#99): canonicalization before matching
     # in the resolver and at the entity write boundary share one loaded copy.
     embedder = _build_embedder(settings)
+    writer.evidence_embedder = embedder
     messages = OpenAICompatibleMessagesClient(
         base_url=settings.llm_base_url,
         model=settings.llm_model,
@@ -568,6 +569,28 @@ def backfill_sources_command(settings: Settings, out=sys.stdout) -> int:
     return 0
 
 
+def backfill_evidence_command(settings: Settings, out=sys.stdout) -> int:
+    """Embed un-embedded ledger evidence snippets in place."""
+    try:
+        driver = _driver(settings)
+        try:
+            embedder = _build_embedder(settings)
+            report = Neo4jGraphWriter(
+                driver, database=settings.database, evidence_embedder=embedder
+            ).backfill_evidence_embeddings()
+        finally:
+            driver.close()
+    except Exception as error:  # CLI should provide a useful failure without a traceback.
+        print(f"Evidence backfill failed: {error}", file=sys.stderr)
+        return 1
+    print(
+        "Evidence backfill complete: "
+        + ", ".join(f"{key}={value}" for key, value in report.items()),
+        file=out,
+    )
+    return 0
+
+
 def normalize_relations_command(settings: Settings, out=sys.stdout) -> int:
     """Run the one-off relation normalization pass and print its report."""
     try:
@@ -764,6 +787,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provenance.set_defaults(
         handler=lambda a: provenance_command(Settings.from_env(), a.source_id))
+    backfill_ev = subparsers.add_parser(
+        "backfill-evidence-embeddings",
+        help="embed un-embedded ledger evidence snippets (evidence-search slice)",
+        description=(
+            "Idempotent backfill: every ExtractionEvent / StateEvent without an "
+            "evidence_embedding gets one via the local Ollama bge-m3 embedder "
+            "(ADR-0001). Rows whose embedder is unavailable are skipped and "
+            "picked up on the next run. Requires Ollama to be reachable."
+        ),
+    )
+    backfill_ev.set_defaults(
+        handler=lambda: backfill_evidence_command(Settings.from_env()))
     normalize = subparsers.add_parser(
         "normalize-relations",
         help="re-canonicalize ledger relations through the relation registry (ADR-0003)",

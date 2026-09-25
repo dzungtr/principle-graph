@@ -39,6 +39,7 @@ no-op under the default keep-first mode.
 | `source_ref` | string | yes | Source/chunk or page reference; part of row identity. |
 | `confidence` | float | yes | This extraction event's own confidence in `[0.0, 1.0]`. |
 | `evidence` | string | yes | Single supporting snippet — lists exist nowhere anymore. |
+| `evidence_embedding` | list<float> | no | Local Ollama `bge-m3` embedding of `evidence`, 1024 dimensions (ADR-0001); written at row creation when an evidence embedder is wired, never rewritten by keep-first. Indexed by `extraction_evidence_embedding` for semantic evidence search; hits trace provenance via the row's `:REPORTED`/`:ABOUT`/`:FROM_SOURCE` wiring. Backfilled by `pg backfill-evidence-embeddings`. |
 | `scope_conditions` | string | no | Qualifiers claimed by this extraction. |
 | `domain` | string | no | Optional domain tag, canonicalized against `domain-registry.yaml` at the write boundary (aliases collapse, unknowns pass through flagged); untagged when absent (slice #78). |
 | `created_at` | datetime | yes | First persistence time. |
@@ -64,6 +65,7 @@ so alias-typed state candidates never fragment the entity.
 | `as_of` | string | yes | Point-in-time the assertion holds. Current-state resolution orders on this, then confidence. |
 | `confidence` | float | yes | Extraction confidence in `[0.0, 1.0]`. |
 | `evidence` | string | yes | Supporting snippet. |
+| `evidence_embedding` | list<float> | no | Local Ollama `bge-m3` embedding of `evidence`, 1024 dimensions (ADR-0001); indexed by `state_evidence_embedding`. |
 | `scope_conditions` | string | no | Qualifiers claimed by the extraction. |
 | `unknown_key` | boolean | no | True when `state_key` was not in the registry (never-reject stance, PRD #95). |
 | `created_at` / `updated_at` | datetime | yes | First persistence / last touch (keep-first never rewrites values). |

@@ -5,7 +5,8 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Protocol, Sequence
+from dataclasses import dataclass
 
 from .label_registry import (
     LabelRegistry,
@@ -71,6 +72,29 @@ class RejectedRecordSink:
             stream.write(json.dumps(record, default=_json_default) + "\n")
 
 
+@dataclass(frozen=True)
+class EvidenceHit:
+    """One evidence-search hit: the ledger row plus its full provenance wiring."""
+
+    subject: str
+    relation: str
+    object: str
+    evidence: str
+    confidence: float
+    source_ref: str
+    score: float
+
+
+class EvidenceEmbeddingProvider(Protocol):
+    """Seam for embedding ledger evidence text (evidence-search slice).
+
+    Same contract as the resolver's EmbeddingProvider: returns a vector or
+    None on failure; failure never blocks a write.
+    """
+
+    def embed(self, text: str) -> Sequence[float] | None: ...
+
+
 class Neo4jGraphWriter:
     """GraphWriter seam implementation: entity/edge upserts, get-edge, rejected records."""
 
@@ -84,9 +108,14 @@ class Neo4jGraphWriter:
         domain_registry: LabelRegistry | None = None,
         state_registry: LabelRegistry | None = None,
         entity_registry: LabelRegistry | None = None,
+        evidence_embedder: EvidenceEmbeddingProvider | None = None,
     ) -> None:
         self.driver = driver
         self.database = database
+        # Evidence-search slice: optional embedder over ledger-row evidence text.
+        # None disables evidence embedding entirely — rows still write (the
+        # never-reject stance) and simply carry no embedding until backfilled.
+        self.evidence_embedder = evidence_embedder
         self.rejected_sink = RejectedRecordSink(rejected_log_path)
         # Invalid modes raise here, before any session opens (issue #59 AC 2).
         self.repeat_mode = resolve_repeat_mode(repeat_mode)
@@ -258,6 +287,12 @@ class Neo4jGraphWriter:
         "ON CREATE SET e.confidence = $confidence, e.evidence = $evidence, "
         "e.scope_conditions = $scope_conditions, e.domain = $domain, "
         "e.raw_relation = $raw_relation, "
+        # Evidence-search slice: embedding is written on create only. The CASE
+        # guard keeps keep-first semantics exact — a None embedder must never
+        # erase a previously stored vector, and refresh mode replaces values in
+        # place, so the embedding follows the refreshed evidence text.
+        "e.evidence_embedding = CASE WHEN $evidence_embedding IS NULL "
+        "THEN e.evidence_embedding ELSE $evidence_embedding END, "
         "e.created_at = datetime(), e.updated_at = datetime() "
         "ON MATCH SET e.updated_at = datetime()"
     )
@@ -270,6 +305,8 @@ class Neo4jGraphWriter:
         "SET e.confidence = $confidence, e.evidence = $evidence, "
         "e.scope_conditions = $scope_conditions, e.domain = $domain, "
         "e.raw_relation = $raw_relation, "
+        "e.evidence_embedding = CASE WHEN $evidence_embedding IS NULL "
+        "THEN e.evidence_embedding ELSE $evidence_embedding END, "
         "e.updated_at = datetime()"
     )
     # Source provenance (issue #79, ADR-0004): appended to both row writes so new
@@ -280,6 +317,12 @@ class Neo4jGraphWriter:
         "ON CREATE SET src.first_seen = datetime() "
         "MERGE (e)-[:FROM_SOURCE]->(src)"
     )
+
+    def _evidence_embedding(self, text: str) -> Sequence[float] | None:
+        """Embedding for one evidence snippet, or None when unavailable."""
+        if self.evidence_embedder is None or not text:
+            return None
+        return self.evidence_embedder.embed(text)
 
     def _write_row(self, session, query: str, row: LedgerRow) -> None:
         """Execute one row write, adding the :Source link when the row has a ref.
@@ -297,6 +340,7 @@ class Neo4jGraphWriter:
             "scope_conditions": row.scope_conditions,
             "domain": row.domain,
             "raw_relation": row.raw_relation,
+            "evidence_embedding": self._evidence_embedding(row.evidence),
         }
         if row.source_ref:
             params["source_id"] = source_id_of(row.source_ref)
@@ -388,6 +432,8 @@ class Neo4jGraphWriter:
         "(e:ExtractionEvent {relation: $relation, source_ref: $source_ref})-[:ABOUT]->(o) "
         "ON CREATE SET e.confidence = $confidence, e.evidence = $evidence, "
         "e.scope_conditions = $scope_conditions, e.domain = $domain, "
+        "e.evidence_embedding = CASE WHEN $evidence_embedding IS NULL "
+        "THEN e.evidence_embedding ELSE $evidence_embedding END, "
         "e.created_at = datetime(), e.updated_at = datetime()"
     )
     _BACKFILL_ARROW_CONFIDENCE_QUERY = (
@@ -473,6 +519,7 @@ class Neo4jGraphWriter:
                     evidence=row.evidence,
                     scope_conditions=row.scope_conditions,
                     domain=row.domain,
+                    evidence_embedding=self._evidence_embedding(row.evidence),
                 ).consume()
             arrows_recomputed = 0
             for update in plan.arrow_updates:
@@ -914,6 +961,8 @@ class Neo4jGraphWriter:
         "ON CREATE SET s.value = $value, s.unit = $unit, s.as_of = $as_of, "
         "s.confidence = $confidence, s.evidence = $evidence, "
         "s.scope_conditions = $scope_conditions, s.entity_type = $entity_type, "
+        "s.evidence_embedding = CASE WHEN $evidence_embedding IS NULL "
+        "THEN s.evidence_embedding ELSE $evidence_embedding END, "
         "s.created_at = datetime(), s.updated_at = datetime() "
         "ON MATCH SET s.updated_at = datetime()"
     )
@@ -970,6 +1019,7 @@ class Neo4jGraphWriter:
                     "value": row.value, "unit": row.unit, "as_of": row.as_of,
                     "confidence": row.confidence, "evidence": row.evidence,
                     "scope_conditions": row.scope_conditions,
+                    "evidence_embedding": self._evidence_embedding(row.evidence),
                 }
                 if row.source_ref:
                     params["source_id"] = source_id_of(row.source_ref)
@@ -983,6 +1033,85 @@ class Neo4jGraphWriter:
                     entity=entity_name, entity_type=candidate.entity_type,
                     state=json.dumps(entries, default=str),
                 )
+
+    # Evidence-search slice: vector search over ledger evidence text resolves
+    # directly to the row, whose REPORTED/ABOUT/FROM_SOURCE wiring supplies the
+    # full provenance chain in one hop.
+    _EVIDENCE_SEARCH_QUERY = (
+        "CALL db.index.vector.queryNodes($index, $limit, $embedding) "
+        "YIELD node, score "
+        "WITH node, score WHERE node.relation IS NOT NULL "
+        "OPTIONAL MATCH (s:Entity)-[:REPORTED]->(node) "
+        "OPTIONAL MATCH (node)-[:ABOUT]->(o:Entity) "
+        "RETURN s.name AS subject, node.relation AS relation, "
+        "coalesce(o.name, '') AS object, node.evidence AS evidence, "
+        "node.confidence AS confidence, node.source_ref AS source_ref, score "
+        "ORDER BY score DESC"
+    )
+
+    def search_evidence(
+        self, embedding: Sequence[float], limit: int = 10
+    ) -> list[EvidenceHit]:
+        """Semantic search over ExtractionEvent evidence; hits carry provenance."""
+        with self.driver.session(database=self.database) as session:
+            return [
+                EvidenceHit(
+                    row["subject"], row["relation"], row["object"],
+                    row["evidence"] or "", float(row["confidence"] or 0.0),
+                    row["source_ref"] or "", float(row["score"]),
+                )
+                for row in session.run(
+                    self._EVIDENCE_SEARCH_QUERY,
+                    index="extraction_evidence_embedding",
+                    limit=limit,
+                    embedding=list(embedding),
+                )
+            ]
+
+    _EVIDENCE_BACKFILL_LOAD = (
+        "MATCH (e:ExtractionEvent) WHERE e.evidence_embedding IS NULL "
+        "AND coalesce(e.evidence, '') <> '' "
+        "RETURN elementId(e) AS element_id, e.evidence AS evidence "
+        "ORDER BY e.created_at LIMIT $batch"
+    )
+    _EVIDENCE_BACKFILL_STATE_LOAD = (
+        "MATCH (e:StateEvent) WHERE e.evidence_embedding IS NULL "
+        "AND coalesce(e.evidence, '') <> '' "
+        "RETURN elementId(e) AS element_id, e.evidence AS evidence "
+        "ORDER BY e.created_at LIMIT $batch"
+    )
+    _EVIDENCE_BACKFILL_SET = (
+        "MATCH (n) WHERE elementId(n) = $element_id "
+        "SET n.evidence_embedding = $embedding"
+    )
+
+    def backfill_evidence_embeddings(self, batch: int = 500) -> dict[str, int]:
+        """Embed un-embedded ledger rows in place; idempotent (embedded rows skip)."""
+        if self.evidence_embedder is None:
+            raise ValueError(
+                "backfill_evidence_embeddings requires an evidence_embedder"
+            )
+        counts = {"extraction_events": 0, "state_events": 0}
+        for label, load, report in (
+            ("extraction_events", self._EVIDENCE_BACKFILL_LOAD, "ExtractionEvent"),
+            ("state_events", self._EVIDENCE_BACKFILL_STATE_LOAD, "StateEvent"),
+        ):
+            while True:
+                with self.driver.session(database=self.database) as session:
+                    records = list(session.run(load, batch=batch))
+                    for record in records:
+                        embedding = self._evidence_embedding(record["evidence"] or "")
+                        if embedding is None:
+                            continue
+                        session.run(
+                            self._EVIDENCE_BACKFILL_SET,
+                            element_id=record["elementId"],
+                            embedding=list(embedding),
+                        ).consume()
+                counts[label] += len(records)
+                if len(records) < batch:
+                    break
+        return counts
 
     def states_for(self, name: str) -> list[EntityState]:
         """Current states for one entity, read from the denormalized map."""

@@ -478,6 +478,9 @@ def test_writer_refresh_mode_updates_the_matched_row_instead_of_merging():
         "source_id": "doc",
         # ADR-0003: the extracted verb rides along on every row write.
         "raw_relation": "supports",
+        # Evidence-search slice: no embedder wired, so the param is None and the
+        # CASE guard leaves any stored vector untouched.
+        "evidence_embedding": None,
     }
     assert arrow[1]["aggregate_confidence"] == 0.9
     assert arrow[1]["scope_conditions"] == "new scope"
@@ -719,3 +722,58 @@ def test_upsert_state_event_canonicalizes_entity_type_at_boundary():
     [(query, params)] = merge
     assert params["entity_type"] == "person"
     assert "{name: $entity, type: $entity_type}" in query
+
+
+class _StaticEmbedder:
+    """Evidence-search slice: fixed-vector embedder with a call counter."""
+
+    def __init__(self, vector: list[float]):
+        self._vector = vector
+        self.calls = 0
+
+    def embed(self, text: str):
+        self.calls += 1
+        return self._vector
+
+
+def test_writer_embeds_evidence_on_extraction_row_create():
+    # Evidence-search slice: an evidence embedder wired at construction rides
+    # along on row writes; identity-planning is unaffected (plan sees text only).
+    driver = RecordingDriver()
+    embedder = _StaticEmbedder([0.1, 0.2])
+    writer = Neo4jGraphWriter(driver, database="neo4j", evidence_embedder=embedder)
+    writer.upsert_extraction(
+        GraphEdge("a", "supports", "b", 0.9, "doc:chunk-1", ("some evidence",))
+    )
+    [load, merge_row, arrow] = driver.sessions[0].queries
+    assert "evidence_embedding = CASE WHEN $evidence_embedding IS NULL" in merge_row[0]
+    assert merge_row[1]["evidence_embedding"] == [0.1, 0.2]
+    assert embedder.calls == 1
+
+
+def test_writer_keep_first_merge_never_erases_existing_embedding():
+    # The CASE guard: with no embedder wired, the param is None and a stored
+    # vector survives a re-ingest (keep-first extends to the embedding).
+    driver = RecordingDriver()
+    writer = Neo4jGraphWriter(driver, database="neo4j")
+    writer.upsert_extraction(
+        GraphEdge("a", "supports", "b", 0.9, "doc:chunk-1", ("some evidence",))
+    )
+    [_, merge_row, _arrow] = driver.sessions[0].queries
+    assert merge_row[1]["evidence_embedding"] is None
+    assert "THEN e.evidence_embedding ELSE $evidence_embedding END" in merge_row[0]
+
+
+def test_search_evidence_returns_hits_with_provenance():
+    driver = RecordingDriver(rows=[{
+        "subject": "a", "relation": "SUPPORTS", "object": "b",
+        "evidence": "text", "confidence": 0.9,
+        "source_ref": "doc:chunk-1", "score": 0.87,
+    }])
+    writer = Neo4jGraphWriter(driver, database="neo4j")
+    (hit,) = writer.search_evidence([0.5, 0.5], limit=3)
+    [(_, params)] = driver.sessions[0].queries
+    assert params["index"] == "extraction_evidence_embedding"
+    assert params["embedding"] == [0.5, 0.5]
+    assert hit.subject == "a" and hit.relation == "SUPPORTS" and hit.object == "b"
+    assert hit.score == 0.87 and hit.source_ref == "doc:chunk-1"
