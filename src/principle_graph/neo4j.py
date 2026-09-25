@@ -14,6 +14,7 @@ from .label_registry import (
     default_registry_path,
     default_state_registry_path,
     load_label_registry,
+    resolve_relation_registry_path,
 )
 from .ledger import LedgerRow, plan_ledger_writes, resolve_repeat_mode, source_id_of
 from .normalization import plan_normalization
@@ -123,7 +124,7 @@ class Neo4jGraphWriter:
         # construction, so a malformed registry fails before any write.
         self.relation_registry = (
             relation_registry if relation_registry is not None
-            else load_label_registry(default_registry_path())
+            else load_label_registry(resolve_relation_registry_path())
         )
         # Domain tags (PRD #76 slice #78) share the loader contract; same
         # fail-fast-at-construction rule. Unknown domains pass through flagged.

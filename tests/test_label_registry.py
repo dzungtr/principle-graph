@@ -340,3 +340,28 @@ def test_unknown_domain_passes_through_unchanged():
     domain_registry = load_label_registry(default_domain_registry_path())
     assert domain_registry.canonical_for("xenosophy") == "xenosophy"
     assert not domain_registry.is_known("xenosophy")
+
+
+def test_ensure_working_registry_seeds_once(tmp_path, monkeypatch):
+    # Working-registry slice: first call seeds from the packaged file; an
+    # existing working file is never overwritten.
+    import shutil
+    from principle_graph.label_registry import (
+        default_registry_path, ensure_working_registry)
+    monkeypatch.chdir(tmp_path)
+    working = ensure_working_registry()
+    assert working.read_text(encoding="utf-8") == default_registry_path().read_text(encoding="utf-8")
+    working.write_text("version: 999\nlabels: {}\n", encoding="utf-8")
+    ensure_working_registry()
+    assert working.read_text(encoding="utf-8") == "version: 999\nlabels: {}\n"
+
+
+def test_resolve_relation_registry_path_prefers_working(tmp_path, monkeypatch):
+    from principle_graph.label_registry import (
+        default_registry_path, ensure_working_registry,
+        resolve_relation_registry_path)
+    monkeypatch.chdir(tmp_path)
+    assert resolve_relation_registry_path() == default_registry_path()
+    ensure_working_registry()
+    assert resolve_relation_registry_path().name == "relation-registry.yaml"
+    assert ".pg" in str(resolve_relation_registry_path())

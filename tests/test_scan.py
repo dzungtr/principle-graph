@@ -332,3 +332,20 @@ def test_orchestrator_without_scanner_keeps_one_phase_shape(tmp_path):
 def test_normalize_verb_snake_cases():
     assert normalize_verb("Weaponizes Supply") == "weaponizes_supply"
     assert normalize_verb("  Cuts ") == "cuts"
+
+
+def test_scan_staging_writes_to_working_registry(tmp_path, monkeypatch):
+    # Working-registry slice: scan's staging append defaults to the .pg/
+    # working file (seeded from the packaged registry), never the packaged
+    # git-tracked file itself.
+    import yaml
+    from principle_graph.scan import append_proposed_verbs, ensure_working_registry
+    from principle_graph.label_registry import default_registry_path
+    monkeypatch.chdir(tmp_path)
+    working = ensure_working_registry()
+    staged = append_proposed_verbs(working, ("new_verb_one",))
+    assert staged == ("new_verb_one",)
+    doc = yaml.safe_load(working.read_text(encoding="utf-8"))
+    assert "new_verb_one" in doc["proposed"]["labels"]
+    # The packaged registry is untouched by staging.
+    assert "new_verb_one" not in default_registry_path().read_text(encoding="utf-8")
