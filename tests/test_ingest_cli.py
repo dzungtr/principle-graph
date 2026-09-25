@@ -598,3 +598,124 @@ def test_ingest_notice_fires_for_approved_domain_rows(monkeypatch, tmp_path):
         code = cli.ingest_command(settings, str(source), yes=True, out=out)
     assert code == 0
     assert "Fact-check candidates" in out.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Folder ingest: directory of markdown files.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingOrchestrator:
+    """Records the source paths and input_fn it is run with, per call."""
+
+    def __init__(self, verdicts: dict[str, str] | None = None) -> None:
+        self.calls: list[tuple[str, object]] = []
+        self._verdicts = verdicts or {}
+
+    def run(self, source_path, *, input_fn=None):
+        self.calls.append((str(source_path), input_fn))
+        return _FakeResult(self._verdicts.get(source_path.name, "approved"))
+
+
+def _folder_orchestrator(monkeypatch, orchestrator):
+    monkeypatch.setattr("principle_graph.cli.preflight", lambda _s: None)
+    monkeypatch.setattr(
+        "principle_graph.cli.build_orchestrator",
+        lambda _s, repeat_mode=None, novelty_filter=None: (orchestrator, _FakeWriter()),
+    )
+
+
+def test_ingest_directory_runs_each_markdown_file(tmp_path: Path, monkeypatch):
+    """Directory ingest runs the orchestrator once per .md/.markdown file."""
+    orchestrator = _RecordingOrchestrator()
+    _folder_orchestrator(monkeypatch, orchestrator)
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    for name in ("b.md", "a.md", "c.markdown"):
+        (folder / name).write_text("# Demo", encoding="utf-8")
+    out = io.StringIO()
+    with redirect_stdout(out):
+        code = ingest_command(_settings(), str(folder), yes=True, out=out)
+    assert code == 0
+    # Sorted by filename for deterministic order.
+    assert [Path(p).name for p, _ in orchestrator.calls] == ["a.md", "b.md", "c.markdown"]
+    # Per-file stats blocks, then the aggregate summary line.
+    assert out.getvalue().count("transcript-verdict=approved") == 3
+    assert "Ingested 3 files: OK 3, skipped 0" in out.getvalue()
+
+
+def test_ingest_empty_directory_fails_fast_exit_2(tmp_path: Path, monkeypatch):
+    """Empty directory exits 2 before any pre-flight or orchestrator build."""
+    built = []
+
+    def _spy(_s, repeat_mode=None, novelty_filter=None):
+        built.append(True)
+        return (_RecordingOrchestrator(), _FakeWriter())
+
+    monkeypatch.setattr("principle_graph.cli.build_orchestrator", _spy)
+    folder = tmp_path / "empty"
+    folder.mkdir()
+    err = io.StringIO()
+    with redirect_stderr(err):
+        code = ingest_command(_settings(), str(folder))
+    assert code == 2
+    assert "No .md/.markdown files found in directory" in err.getvalue()
+    assert not built  # pre-flight/model spend never reached
+
+
+def test_ingest_directory_skips_unsupported_file_with_notice(tmp_path: Path, monkeypatch):
+    """An unsupported file inside the folder is skipped with a stderr notice."""
+    orchestrator = _RecordingOrchestrator()
+    _folder_orchestrator(monkeypatch, orchestrator)
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "good.md").write_text("# Demo", encoding="utf-8")
+    (folder / "image.pdf").write_bytes(b"%PDF-1.4")
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = ingest_command(_settings(), str(folder), yes=True, out=out)
+    assert code == 0
+    assert [Path(p).name for p, _ in orchestrator.calls] == ["good.md"]
+    assert "Skipping unsupported file: image.pdf" in err.getvalue()
+    assert "Ingested 1 files: OK 1, skipped 1" in out.getvalue()
+
+
+def test_ingest_directory_is_non_recursive_and_sorted(tmp_path: Path, monkeypatch):
+    """Subdirectories are ignored; ordering follows sorted filenames."""
+    orchestrator = _RecordingOrchestrator()
+    _folder_orchestrator(monkeypatch, orchestrator)
+    folder = tmp_path / "notes"
+    (folder / "sub").mkdir(parents=True)
+    (folder / "sub" / "nested.md").write_text("# Demo", encoding="utf-8")
+    (folder / "z.md").write_text("# Demo", encoding="utf-8")
+    (folder / "a.md").write_text("# Demo", encoding="utf-8")
+    out = io.StringIO()
+    with redirect_stdout(out):
+        code = ingest_command(_settings(), str(folder), yes=True, out=out)
+    assert code == 0
+    assert [Path(p).name for p, _ in orchestrator.calls] == ["a.md", "z.md"]
+    # Deterministic across two runs of the same folder.
+    out2 = io.StringIO()
+    with redirect_stdout(out2):
+        ingest_command(_settings(), str(folder), yes=True, out=out2)
+    assert [Path(p).name for p, _ in orchestrator.calls] == ["a.md", "z.md", "a.md", "z.md"]
+
+
+def test_ingest_directory_keep_first_repeat_keyed_per_filename(tmp_path: Path, monkeypatch):
+    """Each folder file reaches the orchestrator with its own filename path, so
+    keep-first repeat mode (keyed by source_id = filename) still applies per file."""
+    orchestrator = _RecordingOrchestrator({"a.md": "approved", "b.md": "rejected"})
+    _folder_orchestrator(monkeypatch, orchestrator)
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    (folder / "a.md").write_text("# Demo", encoding="utf-8")
+    (folder / "b.md").write_text("# Demo", encoding="utf-8")
+    out = io.StringIO()
+    with redirect_stdout(out):
+        code = ingest_command(_settings(), str(folder), yes=True, out=out)
+    # One rejected file -> nonzero exit, but both files were attempted.
+    assert code == 4
+    assert [Path(p).name for p, _ in orchestrator.calls] == ["a.md", "b.md"]
+    assert "transcript-verdict=approved" in out.getvalue()
+    assert "transcript-verdict=rejected" in out.getvalue()
+    assert "Ingested 2 files: OK 1, skipped 0, failed 1" in out.getvalue()

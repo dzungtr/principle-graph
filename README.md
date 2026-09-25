@@ -91,7 +91,18 @@ in one blocking invocation:
 ```sh
 pg ingest path/to/source.md
 pg ingest path/to/source.pdf
+pg ingest path/to/notes/   # folder ingest
 ```
+
+When `<path>` is a **directory**, every `*.md` / `*.markdown` file directly
+inside it (non-recursive, sorted by filename) is ingested one at a time through
+the same pipeline: a pre-flight runs once up front, then each file goes through
+extraction, review, and commit with its own stats block, followed by an
+aggregate summary line (e.g. `Ingested 3 files: OK 2, skipped 1`). An empty
+directory fails fast with exit code 2 before any model spend; an unsupported
+file inside the folder is skipped with a stderr notice and the rest continue.
+Source references stay keyed by filename, so `keep-first` repeat mode works
+across re-ingests of the same folder.
 
 ### Mode-2 review interaction
 
