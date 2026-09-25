@@ -19,6 +19,31 @@ OPTIONS {
   }
 };
 
+// Evidence embeddings (evidence-search slice): bge-m3 vectors on ledger rows so a
+// semantic query over evidence text resolves directly to the ledger row, which
+// carries its full provenance wiring. Same model/dimensionality/similarity as the
+// Entity index (ADR-0001): one model, one comparison space. Null embeddings are
+// skipped by the index silently — un-backfilled rows are simply not searchable.
+CREATE VECTOR INDEX extraction_evidence_embedding IF NOT EXISTS
+FOR (event:ExtractionEvent)
+ON (event.evidence_embedding)
+OPTIONS {
+  indexConfig: {
+    `vector.dimensions`: 1024,
+    `vector.similarity_function`: 'cosine'
+  }
+};
+
+CREATE VECTOR INDEX state_evidence_embedding IF NOT EXISTS
+FOR (event:StateEvent)
+ON (event.evidence_embedding)
+OPTIONS {
+  indexConfig: {
+    `vector.dimensions`: 1024,
+    `vector.similarity_function`: 'cosine'
+  }
+};
+
 // Ledger rows (ADR-0002): append-only per-extraction facts. One :ExtractionEvent per
 // accepted extraction, identified by (subject, relation, object, source_ref). Neo4j
 // Community 5.x cannot express composite uniqueness across relationship endpoints, so
