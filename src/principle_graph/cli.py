@@ -412,6 +412,17 @@ def ingest_command(
     (already resolved into ``settings``); the default is ``keep-first``. Invalid
     values fail fast with exit code 2 before any pre-flight, model spend, or
     graph write.
+
+    Folder ingest: when ``source_path`` is a directory, every ``*.md`` /
+    ``*.markdown`` file inside it (non-recursive, sorted by filename for
+    determinism) is ingested through the same orchestrator flow per file, so
+    pre-flight, the novelty-gate key check, and the review loop behave exactly
+    as a single-file ingest. Source_id stays the filename, so keep-first repeat
+    mode still keys per file across re-ingests of the same folder. An empty
+    directory fails fast with exit code 2 before any pre-flight; an unsupported
+    file inside the folder is skipped with a stderr notice and the rest
+    continue. A per-file stats block is emitted, followed by an aggregate
+    summary line for folder ingests.
     """
     try:
         effective_mode = resolve_repeat_mode(
@@ -424,6 +435,20 @@ def ingest_command(
     if not path.exists():
         print(f"Source not found: {source_path}", file=sys.stderr)
         return 2
+    # Folder ingest: markdown only (non-recursive), sorted for determinism.
+    skipped_files: list[Path] = []
+    if path.is_dir():
+        entries = sorted(path.iterdir(), key=lambda p: p.name)
+        source_files = [p for p in entries
+                        if p.is_file() and p.suffix.lower() in (".md", ".markdown")]
+        skipped_files = [p for p in entries
+                         if p.is_file() and p not in source_files]
+        if not source_files:
+            print(f"No .md/.markdown files found in directory: {source_path}",
+                  file=sys.stderr)
+            return 2
+    else:
+        source_files = [path]
     # ADR-0006 decision 4/6: the gate is always-on, so the Decisions API key is
     # required unless explicitly opted out. Fail before any pre-flight spend.
     if not no_novelty_filter and not os.getenv("OPENROUTER_API_KEY"):
@@ -452,13 +477,45 @@ def ingest_command(
         review_input = _scripted_approve
     else:
         review_input = _interactive_input
+    for unsupported in skipped_files:
+        print(f"Skipping unsupported file: {unsupported.name}", file=sys.stderr)
+    ingest_ok = 0
+    ingest_failed = 0
+    first_failure_code = 0
     try:
-        result = orchestrator.run(path, input_fn=review_input)
+        for source_file in source_files:
+            code = _ingest_single_file(orchestrator, source_file,
+                                       review_input=review_input, out=out)
+            if code == 0:
+                ingest_ok += 1
+            else:
+                ingest_failed += 1
+                if not first_failure_code:
+                    first_failure_code = code
+    finally:
+        driver.close()
+    if path.is_dir():
+        summary = (f"Ingested {len(source_files)} files: OK {ingest_ok}, "
+                   f"skipped {len(skipped_files)}")
+        if ingest_failed:
+            summary += f", failed {ingest_failed}"
+        print(summary, file=out)
+    return first_failure_code
+
+
+def _ingest_single_file(orchestrator, source_path: Path, *,
+                        review_input: Callable[[str], str], out) -> int:
+    """Run the orchestrator over one source file and emit its stats block.
+
+    Returns the single-file exit code: 0 approved, 4 rejected, 3 orchestrator
+    error. Used by both the single-file and folder ingest paths so the review
+    loop and stats emission behave identically per file.
+    """
+    try:
+        result = orchestrator.run(source_path, input_fn=review_input)
     except Exception as error:
         print(f"Ingest failed: {error}", file=sys.stderr)
         return 3
-    finally:
-        driver.close()
     print(result.stats.render(), file=out)
     # Decide-mode trigger surfacing (issue #80, ADR-0005): domains that the
     # Decide-mode trigger surfacing (issue #80, ADR-0005): domains among the
@@ -638,7 +695,11 @@ def build_parser() -> argparse.ArgumentParser:
     query.set_defaults(handler=lambda a: query_command(Settings.from_env(), a.text, a.top_k,
                                                      a.max_edges_per_seed, a.format))
     ingest = subparsers.add_parser("ingest", help="ingest a Markdown or PDF source")
-    ingest.add_argument("path", help="path to a .md/.markdown or .pdf source")
+    ingest.add_argument(
+        "path",
+        help="path to a .md/.markdown or .pdf source, or a directory whose "
+             "*.md/*.markdown files are ingested (non-recursive)",
+    )
     ingest.add_argument("--yes", action="store_true",
                         help="approve the Mode-2 delta without prompting (smoke runs and agents)")
     ingest.add_argument("--repeat-mode", default=None,
