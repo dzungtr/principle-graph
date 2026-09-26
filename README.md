@@ -52,21 +52,41 @@ pg init
 
 ## Query
 
-Query the graph for ranked reasoning directions:
+The old fan-out `pg query <text>` command (ranked reasoning directions) has
+been replaced by read-only vector-search subcommands. Every match carries its
+Neo4j `elementId`, so commands chain: search first, then show by elementId.
+
+Search entities by embedding similarity (duplicates are expected when
+same-named entities differ by type):
 
 ```sh
-pg query "interest rates are rising"
+pg query entity "interest rates" 
+pg query entity "interest rates" --top-k 10 --format json
 ```
 
-Use JSON output or adjust ranking limits:
+Search evidence text across `:ExtractionEvent` and `:StateEvent` ledger rows;
+ hits carry the entity pair they connect:
 
 ```sh
-pg query "interest rates are rising" --format json
-pg query "interest rates are rising" --top-k 10 --max-edges-per-seed 20
+pg query event "rates rising"
+pg query event "rates rising" --format json
 ```
 
-Run `pg query --help` for all options. Queries require a reachable Neo4j instance
-and data already committed to the graph.
+Both commands require a reachable Neo4j instance, a reachable Ollama embedder,
+and data already committed to the graph; the similarity threshold reuses
+`PG_QUERY_SEED_SIMILARITY`.
+
+Inspect one entity by its elementId — linked entities by default, or its state
+rows / ledger rows with `--state` / `--event` (mutually exclusive):
+
+```sh
+pg entity show 4:abc:1
+pg entity show 4:abc:1 --state
+pg entity show 4:abc:1 --event
+```
+
+Run `pg query --help` and `pg entity show --help` for all options. JSON output
+is structured on stdout; notices go to stderr.
 
 ## Reset
 
