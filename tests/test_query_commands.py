@@ -162,42 +162,38 @@ def test_query_entity_low_score_filtered_by_threshold(monkeypatch):
 
 
 def test_query_event_includes_label_and_entity_pair(monkeypatch):
-    driver = _FakeDriver({"extraction_evidence_embedding": [EVENT_ROWS[0]],
-                 "state_evidence_embedding": [EVENT_ROWS[1]]})
+    driver = _FakeDriver({"extraction_evidence_embedding": [EVENT_ROWS[0]]})
     code, out, _ = _run(["query", "event", "rates rising"], driver,
                         monkeypatch=monkeypatch)
     assert code == 0
-    assert "ExtractionEvent" in out and "StateEvent" in out
+    assert "ExtractionEvent" in out
+    assert "StateEvent" not in out
     assert "via REPORTED" in out and "via ABOUT" in out
-    assert "via HAS_STATE_EVENT" in out
-    assert "4:abc:10" in out and "4:abc:11" in out
+    assert "4:abc:10" in out
 
 
 def test_query_event_json_carries_subject_and_object(monkeypatch):
-    driver = _FakeDriver({"extraction_evidence_embedding": [EVENT_ROWS[0]],
-                 "state_evidence_embedding": [EVENT_ROWS[1]]})
+    driver = _FakeDriver({"extraction_evidence_embedding": [EVENT_ROWS[0]]})
     code, out, _ = _run(["query", "event", "rates rising", "--format", "json"],
                         driver, monkeypatch=monkeypatch)
     assert code == 0
     results = json.loads(out)["results"]
     assert results[0]["subject"]["element_id"] == "4:abc:1"
     assert results[0]["object"]["element_id"] == "4:abc:2"
-    assert results[1]["object"] is None  # StateEvent has no object entity
 
 
-def test_query_event_merges_both_evidence_indexes(monkeypatch):
+def test_query_event_only_uses_extraction_evidence_index(monkeypatch):
     driver = _FakeDriver({"extraction_evidence_embedding": [EVENT_ROWS[0]],
                  "state_evidence_embedding": [EVENT_ROWS[1]]})
     _run(["query", "event", "rates", "--format", "json"], driver,
          monkeypatch=monkeypatch)
     indexes = {params.get("index") for _, params in driver._session.run_cyphers}
-    assert "extraction_evidence_embedding" in indexes
-    assert "state_evidence_embedding" in indexes
+    assert indexes == {"extraction_evidence_embedding"}
 
 
-def test_query_event_sorted_by_score_across_indexes(monkeypatch):
-    driver = _FakeDriver({"extraction_evidence_embedding": [EVENT_ROWS[0]],
-                 "state_evidence_embedding": [EVENT_ROWS[1]]})
+def test_query_event_sorted_by_score(monkeypatch):
+    driver = _FakeDriver({"extraction_evidence_embedding":
+                 [EVENT_ROWS[0], dict(EVENT_ROWS[0], score=0.60)]})
     code, out, _ = _run(["query", "event", "rates", "--format", "json"], driver,
                         monkeypatch=monkeypatch)
     scores = [r["score"] for r in json.loads(out)["results"]]

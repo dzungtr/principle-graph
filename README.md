@@ -64,8 +64,8 @@ pg query entity "interest rates"
 pg query entity "interest rates" --top-k 10 --format json
 ```
 
-Search evidence text across `:ExtractionEvent` and `:StateEvent` ledger rows;
- hits carry the entity pair they connect:
+Search evidence text across `:ExtractionEvent` ledger rows; each hit carries
+the entity pair it connects:
 
 ```sh
 pg query event "rates rising"

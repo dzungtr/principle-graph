@@ -100,11 +100,10 @@ class _Neo4jQueryGraph:
 # similarity-threshold filter can be applied before the final LIMIT.
 _VECTOR_SEARCH_FETCH_LIMIT = 100
 
-# Both ledger labels carry the evidence_embedding vector index (ADR-0001);
-# event search spans both so one query covers the whole ledger.
+# The event search spans the :ExtractionEvent evidence vector index
+# (ADR-0001); StateEvent rows are reached via `pg entity show --state`.
 _EVIDENCE_VECTOR_INDEXES = (
     "extraction_evidence_embedding",
-    "state_evidence_embedding",
 )
 
 
@@ -196,7 +195,7 @@ _EVENT_NEIGHBOR_CLAUSE = (
 
 
 def _event_search_rows(graph: _Neo4jQueryGraph, embedding, limit: int) -> list[dict]:
-    """Search both evidence indexes; hits carry their entity wiring and label."""
+    """Search the ExtractionEvent evidence index; hits carry entity wiring."""
     merged: list[dict] = []
     for index in _EVIDENCE_VECTOR_INDEXES:
         merged.extend(graph.rows(
@@ -239,7 +238,7 @@ def _event_result(row: dict) -> dict:
 
 
 def query_event_command(settings: Settings, term: str, top_k: int, output_format: str) -> int:
-    """Vector-similarity search over ExtractionEvent/StateEvent evidence embeddings."""
+    """Vector-similarity search over ExtractionEvent evidence embeddings."""
     if _validated_top_k(top_k) is None:
         return 2
     graph = _Neo4jQueryGraph(settings)
@@ -993,9 +992,9 @@ def build_parser() -> argparse.ArgumentParser:
         "event",
         help="vector-similarity search over evidence embeddings",
         description=(
-            "Embed the search term and rank ledger rows by evidence-text "
-            "similarity, spanning both the ExtractionEvent and StateEvent "
-            "evidence indexes above the PG_QUERY_SEED_SIMILARITY threshold. "
+            "Embed the search term and rank :ExtractionEvent ledger rows by "
+            "evidence-text similarity over the extraction_evidence_embedding "
+            "index above the PG_QUERY_SEED_SIMILARITY threshold. "
             "Hits carry the entity pair the row connects."
         ),
     )
