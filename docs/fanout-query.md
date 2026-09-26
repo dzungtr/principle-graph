@@ -1,6 +1,10 @@
 # Fan-out query contract
 
-Status: accepted for the prototype (2026-08-22)
+Status: the `pg query <text>` fan-out CLI command was removed (2026-11) and
+split into read-only vector-search subcommands (`pg query entity`,
+`pg query event`) plus `pg entity show`. The library contract below
+(`query_directions`, `render_markdown`, seed matching) is unchanged and is
+still used by the demo pipeline; it is no longer reachable through the CLI.
 
 ## Input and seed matching
 

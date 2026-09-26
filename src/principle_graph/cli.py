@@ -14,7 +14,6 @@ from typing import Callable
 from .config import Settings
 from .extraction import SequentialExtractor
 from .factcheck import fact_check_notice, fact_check_rows
-from .fanout import query_directions, render_markdown, seed_states
 from .label_registry import (
     default_entity_registry_path,
     default_registry_path,
@@ -28,7 +27,6 @@ from .neo4j import Neo4jEntityStore, Neo4jGraphWriter, load_existing_edges
 from .novelty import NoveltyFilter
 from .orchestrator import IngestOrchestrator
 from .scan import SourceScanner
-from .resolution import Entity
 
 # Schema DDL ships as package data so it resolves in any install layout
 # (repo checkout, wheel, or the nix-built application in /nix/store).
@@ -78,6 +76,14 @@ def apply_schema(settings: Settings) -> int:
 
 
 class _Neo4jQueryGraph:
+    """Read-only Cypher runner over the live graph for the query/entity commands.
+
+    Replaces the removed ``pg query <text>`` fan-out command: those commands
+    now run directly against the vector indexes and ledger wiring, and every
+    lookup/output uses ``elementId()`` so results can be chained between
+    commands.
+    """
+
     def __init__(self, settings: Settings):
         self.driver = _driver(settings)
         self.database = settings.database
@@ -85,54 +91,250 @@ class _Neo4jQueryGraph:
     def close(self) -> None:
         self.driver.close()
 
-    def entities(self):
+    def rows(self, cypher: str, **params):
         with self.driver.session(database=self.database) as session:
-            rows = session.run("MATCH (e:Entity) RETURN e.name AS name, e.type AS type, e.embedding AS embedding ORDER BY e.name")
-            return [Entity(f"{row['type']}:{row['name']}", row['name'], row['type'], embedding=tuple(row['embedding']) if row['embedding'] else None) for row in rows]
-
-    def edges_for(self, entity):
-        writer = Neo4jGraphWriter(self.driver, self.database)
-        return writer.edges_for_entity(entity.name)
-
-    def states_for(self, entity):
-        writer = Neo4jGraphWriter(self.driver, self.database)
-        return writer.states_for(entity.name)
+            return [dict(record) for record in session.run(cypher, **params)]
 
 
-def query_command(settings: Settings, text: str, top_k: int, max_edges: int, output_format: str) -> int:
+# Vector search fetches a wider candidate pool than the requested top-k so a
+# similarity-threshold filter can be applied before the final LIMIT.
+_VECTOR_SEARCH_FETCH_LIMIT = 100
+
+# The event search spans the :ExtractionEvent evidence vector index
+# (ADR-0001); StateEvent rows are reached via `pg entity show --state`.
+_EVIDENCE_VECTOR_INDEXES = (
+    "extraction_evidence_embedding",
+)
+
+
+def _validated_top_k(top_k: int) -> int | None:
+    if top_k <= 0:
+        print("--top-k must be a positive integer", file=sys.stderr)
+        return None
+    return top_k
+
+
+def _query_embedding(settings: Settings, term: str) -> list[float] | None:
+    """Embed a query term via the shared embedder seam; ``None`` when unavailable."""
+    embedder = _build_embedder(settings)
+    vector = embedder.embed(term) if embedder is not None else None
+    return list(vector) if vector is not None else None
+
+
+def _similarity_rows(graph: _Neo4jQueryGraph, index: str, embedding, limit: int):
+    return graph.rows(
+        "CALL db.index.vector.queryNodes($index, $limit, $embedding) "
+        "YIELD node, score "
+        "RETURN elementId(node) AS element_id, labels(node)[0] AS label, "
+        "node.name AS name, node.type AS type, "
+        "node.relation AS relation, node.evidence AS evidence, "
+        "node.source_ref AS source_ref, node.confidence AS confidence, score "
+        "ORDER BY score DESC",
+        index=index, limit=limit, embedding=embedding,
+    )
+
+
+def _render_search_results_markdown(header: str, results: list[dict]) -> None:
+    print(header)
+    if not results:
+        print("No matches above the similarity threshold.")
+        return
+    for row in results:
+        if row.get("name") is not None:
+            print(f"- {row['element_id']}  {row['name']} ({row.get('type') or ''}) "
+                  f"score={float(row['score']):.4f}")
+        else:
+            print(f"- {row['element_id']}  [{row['label']}] relation={row.get('relation') or ''} "
+                  f"score={float(row['score']):.4f}")
+            print(f"    evidence: {row.get('evidence') or ''}")
+            print(f"    source_ref: {row.get('source_ref') or ''} "
+                  f"confidence={float(row.get('confidence') or 0.0):.2f}")
+            for role in ("subject", "object"):
+                node = row.get(role)
+                if node:
+                    edge = node.get("edge") or ""
+                    print(f"    {role}: {node['element_id']}  {node['name']} "
+                          f"({node.get('type') or ''}) via {edge}")
+
+
+def query_entity_command(settings: Settings, term: str, top_k: int, output_format: str) -> int:
+    """Vector-similarity search over :Entity.embedding (replaces fan-out seeding)."""
+    if _validated_top_k(top_k) is None:
+        return 2
     graph = _Neo4jQueryGraph(settings)
     try:
-        notices: list[str] = []
-        seeds, directions = query_directions(text, graph, top_k=top_k,
-                                             max_edges_per_seed=max_edges,
-                                             embedder=_build_embedder(settings),
-                                             threshold=settings.query_seed_similarity,
-                                             notices=notices)
-        states = seed_states(seeds, graph)
-        for notice in notices:
-            # stderr keeps the JSON output shape (query/seeds/directions) unchanged.
-            print(f"Notice: {notice}", file=sys.stderr)
+        embedding = _query_embedding(settings, term)
+        if embedding is None:
+            print("Embedder unavailable; cannot embed the query term.", file=sys.stderr)
+            return 1
+        rows = _similarity_rows(graph, "entity_embedding", embedding,
+                                _VECTOR_SEARCH_FETCH_LIMIT)
+        results = [row for row in rows if float(row["score"]) >= settings.query_seed_similarity][:top_k]
+        for row in results:
+            row.pop("label", None)
+            row.pop("relation", None)
+            row.pop("evidence", None)
+            row.pop("source_ref", None)
+            row.pop("confidence", None)
         if output_format == "json":
-            print(json.dumps({"query": text,
-                              "seeds": [{"name": s.entity.name, "score": s.score} for s in seeds],
-                              # Seed entity states alongside directions (issue #98).
-                              "states": {name: [{"state_key": st.state_key, "value": st.value,
-                                                 "unit": st.unit, "as_of": st.as_of,
-                                                 "confidence": st.confidence,
-                                                 "source_ref": st.source_ref}
-                                                for st in seed_states_list]
-                                         for name, seed_states_list in states.items()},
-                              "directions": [{"rank": d.rank, "seed": d.seed, "relation": d.relation,
-                                              "neighbor": d.neighbor, "confidence": d.confidence,
-                                              "scope_conditions": d.scope_conditions, "source_ref": d.source_ref,
-                                              "evidence": list(d.evidence)} for d in directions]}))
+            print(json.dumps({"query": term, "results": results}))
         else:
-            print(render_markdown(text, seeds, directions, states=states))
+            _render_search_results_markdown(f"Entities matching: {term}", results)
     except Exception as error:
-        print(f"Neo4j query failed: {error}")
+        print(f"Neo4j query failed: {error}", file=sys.stderr)
         return 1
     finally:
         graph.close()
+    return 0
+
+
+_EVENT_NEIGHBOR_CLAUSE = (
+    "OPTIONAL MATCH (subject:Entity)-[subject_edge]->(node) "
+    "OPTIONAL MATCH (node)-[object_edge]->(object:Entity) "
+)
+
+
+def _event_search_rows(graph: _Neo4jQueryGraph, embedding, limit: int) -> list[dict]:
+    """Search the ExtractionEvent evidence index; hits carry entity wiring."""
+    merged: list[dict] = []
+    for index in _EVIDENCE_VECTOR_INDEXES:
+        merged.extend(graph.rows(
+            "CALL db.index.vector.queryNodes($index, $limit, $embedding) "
+            "YIELD node, score "
+            "WITH node, score, labels(node)[0] AS label "
+            + _EVENT_NEIGHBOR_CLAUSE +
+            "RETURN elementId(node) AS element_id, label, "
+            "coalesce(node.relation, '') AS relation, "
+            "coalesce(node.evidence, '') AS evidence, "
+            "coalesce(node.source_ref, '') AS source_ref, "
+            "coalesce(node.confidence, 0.0) AS confidence, score, "
+            "elementId(subject) AS subject_id, subject.name AS subject_name, "
+            "subject.type AS subject_type, type(subject_edge) AS subject_edge, "
+            "elementId(object) AS object_id, object.name AS object_name, "
+            "object.type AS object_type, type(object_edge) AS object_edge",
+            index=index, limit=limit, embedding=embedding,
+        ))
+    return merged
+
+
+def _event_result(row: dict) -> dict:
+    subject = ({"element_id": row["subject_id"], "name": row["subject_name"],
+                "type": row["subject_type"], "edge": row.get("subject_edge") or ""}
+               if row.get("subject_id") else None)
+    object_node = ({"element_id": row["object_id"], "name": row["object_name"],
+                    "type": row["object_type"], "edge": row.get("object_edge") or ""}
+                   if row.get("object_id") else None)
+    return {
+        "element_id": row["element_id"],
+        "label": row["label"],
+        "relation": row["relation"],
+        "evidence": row["evidence"],
+        "source_ref": row["source_ref"],
+        "confidence": float(row["confidence"]),
+        "score": float(row["score"]),
+        "subject": subject,
+        "object": object_node,
+    }
+
+
+def query_event_command(settings: Settings, term: str, top_k: int, output_format: str) -> int:
+    """Vector-similarity search over ExtractionEvent evidence embeddings."""
+    if _validated_top_k(top_k) is None:
+        return 2
+    graph = _Neo4jQueryGraph(settings)
+    try:
+        embedding = _query_embedding(settings, term)
+        if embedding is None:
+            print("Embedder unavailable; cannot embed the query term.", file=sys.stderr)
+            return 1
+        rows = _event_search_rows(graph, embedding, _VECTOR_SEARCH_FETCH_LIMIT)
+        results = [_event_result(row) for row in rows
+                   if float(row["score"]) >= settings.query_seed_similarity]
+        results.sort(key=lambda r: -r["score"])
+        results = results[:top_k]
+        if output_format == "json":
+            print(json.dumps({"query": term, "results": results}))
+        else:
+            _render_search_results_markdown(f"Events matching: {term}", results)
+    except Exception as error:
+        print(f"Neo4j query failed: {error}", file=sys.stderr)
+        return 1
+    finally:
+        graph.close()
+    return 0
+
+
+def _entity_show_results(graph: _Neo4jQueryGraph, element_id: str, mode: str) -> list[dict]:
+    """Read one entity's links by mode: entities, states, or events."""
+    if mode == "states":
+        query = (
+            "MATCH (e:Entity) WHERE elementId(e) = $eid "
+            "MATCH (e)-[:HAS_STATE_EVENT]->(s:StateEvent) "
+            "RETURN elementId(s) AS element_id, s.state_key AS state_key, "
+            "coalesce(s.value, '') AS value, coalesce(s.unit, '') AS unit, "
+            "coalesce(s.as_of, '') AS as_of, coalesce(s.confidence, 0.0) AS confidence, "
+            "coalesce(s.source_ref, '') AS source_ref "
+            "ORDER BY state_key"
+        )
+    elif mode == "events":
+        query = (
+            "MATCH (e:Entity) WHERE elementId(e) = $eid "
+            "MATCH (e)-[r]-(ev) WHERE ev:ExtractionEvent OR ev:StateEvent "
+            "RETURN DISTINCT elementId(ev) AS element_id, labels(ev)[0] AS label, "
+            "type(r) AS relation, coalesce(ev.raw_relation, '') AS raw_relation, "
+            "coalesce(ev.evidence, '') AS evidence, "
+            "coalesce(ev.source_ref, '') AS source_ref, "
+            "coalesce(ev.confidence, 0.0) AS confidence "
+            "ORDER BY relation, source_ref"
+        )
+    else:
+        query = (
+            "MATCH (e:Entity) WHERE elementId(e) = $eid "
+            "MATCH (e)-[r]-(n:Entity) "
+            "RETURN DISTINCT type(r) AS relation, "
+            "CASE WHEN startNode(r) = e THEN 'outgoing' ELSE 'incoming' END AS direction, "
+            "elementId(n) AS element_id, n.name AS name, n.type AS type "
+            "ORDER BY relation, direction, name"
+        )
+    return graph.rows(query, eid=element_id)
+
+
+def entity_show_command(settings: Settings, element_id: str, state: bool, event: bool,
+                        output_format: str) -> int:
+    """List an entity's linked entities, state rows, or ledger events by elementId."""
+    mode = "states" if state else "events" if event else "entities"
+    graph = _Neo4jQueryGraph(settings)
+    try:
+        if not graph.rows("MATCH (e:Entity) WHERE elementId(e) = $eid "
+                          "RETURN elementId(e) AS element_id", eid=element_id):
+            print(f"Entity not found: {element_id}", file=sys.stderr)
+            return 1
+        results = _entity_show_results(graph, element_id, mode)
+    except Exception as error:
+        print(f"Neo4j query failed: {error}", file=sys.stderr)
+        return 1
+    finally:
+        graph.close()
+    if output_format == "json":
+        print(json.dumps({"element_id": element_id, "mode": mode, "results": results}))
+    else:
+        print(f"Entity {element_id} — {mode}")
+        if not results:
+            print("No linked rows.")
+        for row in results:
+            if mode == "entities":
+                print(f"- {row['direction']} {row['relation']}  {row['element_id']}  "
+                      f"{row['name']} ({row['type']})")
+            elif mode == "states":
+                print(f"- {row['element_id']}  {row['state_key']}={row['value']}"
+                      f"{(' ' + row['unit']) if row['unit'] else ''} "
+                      f"as_of={row['as_of']} confidence={float(row['confidence']):.2f} "
+                      f"source_ref={row['source_ref']}")
+            else:
+                print(f"- {row['element_id']}  [{row['label']}] {row['relation']} "
+                      f"(raw: {row['raw_relation'] or 'n/a'}) "
+                      f"confidence={float(row['confidence']):.2f} source_ref={row['source_ref']}")
+                print(f"    evidence: {row['evidence']}")
     return 0
 
 
@@ -759,13 +961,78 @@ def build_parser() -> argparse.ArgumentParser:
     check.set_defaults(handler=lambda: check_connection(Settings.from_env()))
     init = subparsers.add_parser("init", help="verify connectivity and apply the graph schema")
     init.set_defaults(handler=lambda: apply_schema(Settings.from_env()))
-    query = subparsers.add_parser("query", help="return ranked reasoning directions")
-    query.add_argument("text", help="new information to use as the query")
-    query.add_argument("--top-k", type=int, default=5)
-    query.add_argument("--max-edges-per-seed", type=int, default=20)
-    query.add_argument("--format", choices=("markdown", "json"), default="markdown")
-    query.set_defaults(handler=lambda a: query_command(Settings.from_env(), a.text, a.top_k,
-                                                     a.max_edges_per_seed, a.format))
+    query = subparsers.add_parser(
+        "query",
+        help="vector search over entities and evidence",
+        description=(
+            "Vector-similarity search over the graph's embeddings: entities "
+            "(`pg query entity`) and evidence text on ledger rows (`pg query "
+            "event`). Read-only; every match carries its elementId so the next "
+            "command can be bound to it. Requires a reachable Ollama embedder."
+        ),
+    )
+    query_sub = query.add_subparsers(dest="query_command")
+    qentity = query_sub.add_parser(
+        "entity",
+        help="vector-similarity search over :Entity embeddings",
+        description=(
+            "Embed the search term and rank :Entity nodes by embedding "
+            "similarity (entity_embedding index) above the "
+            "PG_QUERY_SEED_SIMILARITY threshold. Duplicates are expected "
+            "when same-named entities differ by type; elementId binds the "
+            "next command."
+        ),
+    )
+    qentity.add_argument("term", help="search text embedded and matched against entity embeddings")
+    qentity.add_argument("--top-k", type=int, default=5)
+    qentity.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    qentity.set_defaults(
+        handler=lambda a: query_entity_command(Settings.from_env(), a.term, a.top_k, a.format))
+    qevent = query_sub.add_parser(
+        "event",
+        help="vector-similarity search over evidence embeddings",
+        description=(
+            "Embed the search term and rank :ExtractionEvent ledger rows by "
+            "evidence-text similarity over the extraction_evidence_embedding "
+            "index above the PG_QUERY_SEED_SIMILARITY threshold. "
+            "Hits carry the entity pair the row connects."
+        ),
+    )
+    qevent.add_argument("term", help="search text embedded and matched against evidence embeddings")
+    qevent.add_argument("--top-k", type=int, default=5)
+    qevent.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    qevent.set_defaults(
+        handler=lambda a: query_event_command(Settings.from_env(), a.term, a.top_k, a.format))
+    entity = subparsers.add_parser(
+        "entity",
+        help="inspect one entity by elementId",
+        description=(
+            "Read-only inspection of a single :Entity node, addressed by its "
+            "Neo4j elementId (from `pg query entity` output)."
+        ),
+    )
+    entity_sub = entity.add_subparsers(dest="entity_command")
+    show = entity_sub.add_parser(
+        "show",
+        help="list an entity's linked entities, states, or events",
+        description=(
+            "List what one entity links to. Default lists distinct neighbor "
+            "entities over typed edges with direction; --state lists "
+            "StateEvent rows via HAS_STATE_EVENT; --event lists linked "
+            "ExtractionEvent/StateEvent ledger rows. --state and --event are "
+            "mutually exclusive."
+        ),
+    )
+    show.add_argument("element_id", help=":Entity elementId (from `pg query entity` output)")
+    show_flags = show.add_mutually_exclusive_group()
+    show_flags.add_argument("--state", action="store_true",
+                            help="list StateEvent rows linked via HAS_STATE_EVENT")
+    show_flags.add_argument("--event", action="store_true",
+                            help="list linked ExtractionEvent/StateEvent ledger rows")
+    show.add_argument("--format", choices=("markdown", "json"), default="markdown")
+    show.set_defaults(
+        handler=lambda a: entity_show_command(Settings.from_env(), a.element_id,
+                                              a.state, a.event, a.format))
     ingest = subparsers.add_parser("ingest", help="ingest a Markdown or PDF source")
     ingest.add_argument(
         "path",
@@ -932,7 +1199,7 @@ def build_parser() -> argparse.ArgumentParser:
         handler=lambda args: reset_command(Settings.from_env(), yes=args.yes)
     )
     for sub in (check, init, query, ingest, migrate, backfill, provenance,
-                normalize, factcheck, reset):
+                normalize, factcheck, reset, entity):
         handler = sub._defaults.get("handler")
         if handler is not None:
             params = len(inspect.signature(handler).parameters)
@@ -949,7 +1216,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
-    return args.handler(args)
+    handler = getattr(args, "handler", None)
+    if handler is None:
+        # Bare `pg query` / `pg entity` with no subcommand: usage error, not a crash.
+        print("Missing subcommand; see `pg --help`.", file=sys.stderr)
+        return 2
+    return handler(args)
 
 
 if __name__ == "__main__":
