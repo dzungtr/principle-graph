@@ -16,4 +16,4 @@ pg = "principle_graph.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-principle_graph = ["data/*.cypher"]
+principle_graph = ["data/*.yaml", "data/*.cypher"]
