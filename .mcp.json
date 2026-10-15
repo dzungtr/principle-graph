@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "agentic-memory": {
-      "type": "http",
-      "url": "http://localhost:8121/mcp/",
-      "directTools": true
-    }
-  }
-}
